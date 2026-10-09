@@ -1,0 +1,441 @@
+// エージェントエージェント データモデル
+// docs/02_architecture.md の「データモデル」と対応しています。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+/// エージェント(案件紹介会社)の状態
+enum AgentStatus {
+  ACTIVE
+  PAUSED
+  BLOCKED
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+/// 受信メールのAI処理状態
+enum ProcessingStatus {
+  PENDING
+  PROCESSED
+  SKIPPED
+  ERROR
+}
+
+/// 受信メールの分類(docs/03_ai_design.md 参照)
+enum MessageCategory {
+  INTRO
+  JOB_PROPOSAL
+  STATUS_CHECK
+  DOCUMENT_REQUEST
+  INTERVIEW_SCHEDULING
+  INTERVIEW_CONFIRMATION
+  SELECTION_RESULT
+  RATE_NEGOTIATION
+  CONTRACT
+  THANKS_CLOSING
+  NEWSLETTER
+  OTHER
+}
+
+/// スレッドの状態
+/// OPEN: 相手からの受信あり・対応中 / WAITING_THEM: こちらが返信済み・相手待ち
+/// NEEDS_ACTION: ユーザーの対応(承認など)が必要 / CLOSED, ARCHIVED: 終了
+enum ThreadStatus {
+  OPEN
+  WAITING_THEM
+  NEEDS_ACTION
+  CLOSED
+  ARCHIVED
+}
+
+enum ReplyStatus {
+  PENDING_APPROVAL
+  SCHEDULED
+  SENDING
+  SENT
+  REJECTED
+  FAILED
+  CANCELLED
+}
+
+/// 返信案の判定結果
+enum ReplyDecision {
+  AUTO
+  NEEDS_APPROVAL
+  MANUAL
+}
+
+enum OpportunityStage {
+  NEW
+  INTERESTED
+  APPLIED
+  INTERVIEW_SCHEDULING
+  INTERVIEWED
+  OFFER
+  ACCEPTED
+  DECLINED
+  LOST
+  CLOSED
+}
+
+enum PolicyMode {
+  AUTO_WITH_APPROVAL
+  APPROVE_ALL
+  FULL_AUTO
+}
+
+enum SenderKind {
+  AGENT
+  NOT_AGENT
+}
+
+enum WorkStyle {
+  REMOTE_ONLY
+  HYBRID
+  ONSITE_OK
+}
+
+enum AvailabilityStatus {
+  LOOKING
+  OPEN_TO_OFFERS
+  NOT_LOOKING
+}
+
+// ---------------------------------------------------------------------------
+// ユーザー・認証
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  googleAccount  GoogleAccount?
+  sessions       Session[]
+  profile        Profile?
+  policy         ReplyPolicy?
+  agents         Agent[]
+  contacts       Contact[]
+  senderVerdicts SenderVerdict[]
+  threads        Thread[]
+  replies        Reply[]
+  opportunities  Opportunity[]
+  activityLogs   ActivityLog[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/// Gmail連携用のGoogleアカウント。トークンはAES-256-GCMで暗号化して保存する。
+model GoogleAccount {
+  id                    String    @id @default(cuid())
+  userId                String    @unique
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  googleId              String    @unique
+  email                 String
+  encryptedRefreshToken String
+  encryptedAccessToken  String?
+  accessTokenExpiresAt  DateTime?
+  scopes                String
+  lastSyncedAt          DateTime?
+  lastSyncError         String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// 本人のプロフィールと返信ポリシー
+// ---------------------------------------------------------------------------
+
+/// AIが返信を書くときに参照する本人の情報
+model Profile {
+  id                    String             @id @default(cuid())
+  userId                String             @unique
+  user                  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  displayName           String
+  headline              String?
+  yearsOfExperience     Int?
+  skills                String[]           @default([])
+  summary               String?
+  desiredRateMin        Int?
+  desiredRateMax        Int?
+  availabilityStatus    AvailabilityStatus @default(LOOKING)
+  availableFrom         DateTime?
+  weeklyDays            String?
+  workStyle             WorkStyle          @default(REMOTE_ONLY)
+  locations             String[]           @default([])
+  ngConditions          String?
+  preferences           String?
+  interviewAvailability String?
+  skillSheetUrl         String?
+  signature             String?
+  writingStyle          String?
+  styleSamples          String?
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+}
+
+/// 自動返信の可否や送信タイミングを決める設定
+model ReplyPolicy {
+  id                            String     @id @default(cuid())
+  userId                        String     @unique
+  user                          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mode                          PolicyMode @default(AUTO_WITH_APPROVAL)
+  approvalCategories            String[]   @default([])
+  noReplyCategories             String[]   @default([])
+  approvalCommitments           String[]   @default([])
+  requireApprovalForNewAgents   Boolean    @default(true)
+  confidenceThreshold           Float      @default(0.7)
+  maxAutoRepliesPerThreadPerDay Int        @default(2)
+  timezone                      String     @default("Asia/Tokyo")
+  businessHoursStart            Int        @default(9)
+  businessHoursEnd              Int        @default(19)
+  replyOnWeekends               Boolean    @default(false)
+  minDelayMinutes               Int        @default(20)
+  maxDelayMinutes               Int        @default(90)
+  replyAll                      Boolean    @default(true)
+  customInstructions            String?
+  createdAt                     DateTime   @default(now())
+  updatedAt                     DateTime   @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// エージェント・担当者
+// ---------------------------------------------------------------------------
+
+model Agent {
+  id               String      @id @default(cuid())
+  userId           String
+  user             User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name             String
+  domains          String[]    @default([])
+  website          String?
+  notes            String?
+  status           AgentStatus @default(ACTIVE)
+  rating           Int?
+  autoReplyEnabled Boolean     @default(true)
+  requireApproval  Boolean     @default(false)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  contacts      Contact[]
+  threads       Thread[]
+  opportunities Opportunity[]
+
+  @@index([userId])
+}
+
+model Contact {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId       String
+  agent         Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  name          String?
+  email         String
+  role          String?
+  phone         String?
+  notes         String?
+  lastContactAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  threads Thread[]
+
+  @@unique([userId, email])
+  @@index([agentId])
+}
+
+/// 送信者ごとの「エージェントかどうか」の判定結果。同じ送信者を繰り返しAIに判定させないためのキャッシュ。
+model SenderVerdict {
+  id        String     @id @default(cuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email     String
+  domain    String
+  kind      SenderKind
+  reason    String?
+  createdAt DateTime   @default(now())
+
+  @@unique([userId, email])
+}
+
+// ---------------------------------------------------------------------------
+// スレッド・メッセージ・返信
+// ---------------------------------------------------------------------------
+
+model Thread {
+  id             String           @id @default(cuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId        String?
+  agent          Agent?           @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  contactId      String?
+  contact        Contact?         @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  gmailThreadId  String
+  subject        String
+  snippet        String?
+  status         ThreadStatus     @default(OPEN)
+  lastCategory   MessageCategory?
+  summary        String?
+  lastMessageAt  DateTime
+  lastInboundAt  DateTime?
+  lastOutboundAt DateTime?
+  isMuted        Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  messages      Message[]
+  replies       Reply[]
+  opportunities Opportunity[]
+
+  @@unique([userId, gmailThreadId])
+  @@index([userId, lastMessageAt])
+  @@index([userId, status])
+}
+
+model Message {
+  id               String           @id @default(cuid())
+  threadId         String
+  thread           Thread           @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  gmailMessageId   String           @unique
+  direction        MessageDirection
+  fromEmail        String
+  fromName         String?
+  toEmails         String[]         @default([])
+  ccEmails         String[]         @default([])
+  subject          String
+  bodyText         String
+  snippet          String?
+  sentAt           DateTime
+  rfcMessageId     String?
+  inReplyTo        String?
+  references       String?
+  isAutoSubmitted  Boolean          @default(false)
+  processingStatus ProcessingStatus @default(PENDING)
+  processingError  String?
+  processedAt      DateTime?
+  category         MessageCategory?
+  confidence       Float?
+  aiSummary        String?
+  needsReply       Boolean?
+  extracted        Json?
+  createdAt        DateTime         @default(now())
+
+  replies Reply[]
+
+  @@index([threadId, sentAt])
+  @@index([processingStatus])
+}
+
+/// AIが生成した返信案(自動送信・承認待ち・手動返信を含む)
+model Reply {
+  id                 String        @id @default(cuid())
+  userId             String
+  user               User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  threadId           String
+  thread             Thread        @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  inReplyToMessageId String?
+  inReplyToMessage   Message?      @relation(fields: [inReplyToMessageId], references: [id], onDelete: SetNull)
+  subject            String
+  bodyText           String
+  status             ReplyStatus
+  decision           ReplyDecision
+  decisionReasons    String[]      @default([])
+  commitments        String[]      @default([])
+  riskFlags          String[]      @default([])
+  confidence         Float?
+  aiReasoning        String?
+  scheduledFor       DateTime?
+  sentAt             DateTime?
+  sentGmailMessageId String?
+  approvedAt         DateTime?
+  rejectedAt         DateTime?
+  editedByUser       Boolean       @default(false)
+  errorMessage       String?
+  modelId            String?
+  promptVersion      String?
+  usage              Json?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([userId, status])
+  @@index([status, scheduledFor])
+  @@index([threadId])
+}
+
+// ---------------------------------------------------------------------------
+// 案件
+// ---------------------------------------------------------------------------
+
+model Opportunity {
+  id              String           @id @default(cuid())
+  userId          String
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId         String?
+  agent           Agent?           @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  threadId        String?
+  thread          Thread?          @relation(fields: [threadId], references: [id], onDelete: SetNull)
+  sourceMessageId String?
+  title           String
+  description     String?
+  rateMin         Int?
+  rateMax         Int?
+  rateText        String?
+  period          String?
+  startText       String?
+  location        String?
+  remotePolicy    String?
+  skills          String[]         @default([])
+  stage           OpportunityStage @default(NEW)
+  fitScore        Int?
+  fitReason       String?
+  interviewAt     DateTime?
+  notes           String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@index([userId, stage])
+  @@index([threadId])
+}
+
+// ---------------------------------------------------------------------------
+// 活動ログ
+// ---------------------------------------------------------------------------
+
+model ActivityLog {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       String
+  entityType String?
+  entityId   String?
+  message    String
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
