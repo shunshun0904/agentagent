@@ -7,6 +7,7 @@ import { logActivity } from "@/lib/activity";
 import { requireUser } from "@/lib/auth/session";
 import { MESSAGE_CATEGORIES } from "@/lib/ai/schemas";
 import { COMMITMENT_TYPES } from "@/lib/policy/defaults";
+import { parseExcludedSenders } from "@/lib/policy/exclusions";
 import { bool, dateOrNull, int, list, multi, num, oneOf, optStr, str } from "@/actions/form";
 
 const AVAILABILITY = ["LOOKING", "OPEN_TO_OFFERS", "NOT_LOOKING"] as const;
@@ -80,6 +81,7 @@ export async function savePolicyAction(formData: FormData): Promise<void> {
     maxDelayMinutes: clamp(int(formData, "maxDelayMinutes"), 0, 1440, 90),
     replyAll: bool(formData, "replyAll"),
     customInstructions: optStr(formData, "customInstructions"),
+    excludedSenders: parseExcludedSenders(str(formData, "excludedSenders")),
   };
   if (data.maxDelayMinutes < data.minDelayMinutes) data.maxDelayMinutes = data.minDelayMinutes;
   await prisma.replyPolicy.upsert({

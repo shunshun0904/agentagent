@@ -8,6 +8,7 @@ import { describeError, errorMessage, shouldRetryLater } from "@/lib/errors";
 import { getGmailForUser, type GmailContext } from "@/lib/gmail/client";
 import { parseGmailMessage, type ParsedGmailMessage } from "@/lib/gmail/parse";
 import { createGmailCaller, GMAIL_UNITS, gmailUnitsBudget, type GmailCaller } from "@/lib/gmail/throttle";
+import { isExcludedSender } from "@/lib/policy/exclusions";
 import { extractDomain, isFreeMailDomain, looksLikeNoReply, truncate } from "@/lib/text";
 
 export type SyncResult = {
@@ -48,6 +49,8 @@ type SyncState = {
   ctx: GmailContext;
   ai: AiService;
   domainToAgent: Map<string, Agent>;
+  /** 返信ポリシーの「除外する送信者」(メールアドレスまたはドメイン) */
+  excludedSenders: string[];
   senderChecks: number;
   senderCheckLimit: number;
   /** 判定上限で見送った最初のメールの受信時刻(次回の同期開始位置) */
@@ -55,8 +58,8 @@ type SyncState = {
   result: SyncResult;
 };
 
-/** 旧バージョンが一斉配信を一律に除外したときの判定理由。この判定は使わずに判定し直す */
-const LEGACY_BULK_VERDICT_REASON = "一斉配信または自動送信アドレス";
+/** AI の送信者判定をエージェントとして採用する確信度の下限。フリーランスエージェント以外を取り込まないよう高めにする */
+const AGENT_CONFIDENCE_THRESHOLD = 0.7;
 
 function buildQuery(lastSyncedAt: Date | null, fullWindow: boolean): string {
   const env = getEnv();
@@ -130,13 +133,20 @@ async function resolveAgentForInbound(state: SyncState, parsed: ParsedGmailMessa
   const email = parsed.from.email;
   const domain = extractDomain(email);
 
+  // 1. 一斉配信(List-Unsubscribe など)、自動送信、no-reply のメールは、既知のエージェントのドメインでも取り込まない。
+  //    判定結果は記録しない(同じ送信者から個別のメールが届いたときは、あらためて判定する)。
+  //    設定で除外した送信者は、ingestParsedMessage の先頭で取り込みを止めている
+  if (parsed.isBulk || parsed.isAutoSubmitted || looksLikeNoReply(email)) return null;
+
+  // 2. 既知のエージェントのドメイン
   const byDomain = state.domainToAgent.get(domain);
   if (byDomain) return byDomain;
 
+  // 3. 判定済みの送信者
   const verdict = await prisma.senderVerdict.findUnique({
     where: { userId_email: { userId: state.userId, email } },
   });
-  if (verdict?.kind === "NOT_AGENT" && verdict.reason !== LEGACY_BULK_VERDICT_REASON) return null;
+  if (verdict?.kind === "NOT_AGENT") return null;
   if (verdict?.kind === "AGENT") {
     const contact = await prisma.contact.findUnique({
       where: { userId_email: { userId: state.userId, email } },
@@ -145,18 +155,7 @@ async function resolveAgentForInbound(state: SyncState, parsed: ParsedGmailMessa
     if (contact) return contact.agent;
   }
 
-  // 自動送信のメールや no-reply のアドレスからの未知の送信者は、判定せずに除外する。
-  // 一斉配信(List-Unsubscribe など)は除外しない。エージェントの担当者が配信システムで案件紹介を送ることがあるため
-  if (parsed.isAutoSubmitted || looksLikeNoReply(email)) {
-    const reason = "自動送信または no-reply のアドレス";
-    await prisma.senderVerdict.upsert({
-      where: { userId_email: { userId: state.userId, email } },
-      create: { userId: state.userId, email, domain, kind: "NOT_AGENT", reason },
-      update: verdict?.reason === LEGACY_BULK_VERDICT_REASON ? { reason } : {},
-    });
-    return null;
-  }
-
+  // 4. AI による判定(1 回の同期で上限まで)
   if (state.senderChecks >= state.senderCheckLimit) {
     if (!state.deferredFrom || parsed.sentAt < state.deferredFrom) state.deferredFrom = parsed.sentAt;
     return "deferred";
@@ -171,7 +170,7 @@ async function resolveAgentForInbound(state: SyncState, parsed: ParsedGmailMessa
     snippet: truncate(parsed.bodyText, 1500),
   });
 
-  if (check.is_freelance_agent && check.confidence >= 0.6) {
+  if (check.is_freelance_agent && check.confidence >= AGENT_CONFIDENCE_THRESHOLD) {
     const agent = await createAgentFromSender(state, parsed, check.company_name);
     await prisma.senderVerdict.upsert({
       where: { userId_email: { userId: state.userId, email } },
@@ -193,6 +192,17 @@ async function ingestParsedMessage(state: SyncState, parsed: ParsedGmailMessage)
   const { userId, ctx } = state;
   const isOutbound = parsed.from.email === ctx.accountEmail || parsed.labelIds.includes("SENT");
   const direction = isOutbound ? "OUTBOUND" : "INBOUND";
+
+  // 設定で除外した送信者からの受信メールは、既存のスレッド宛てでも、既知のエージェントのドメインでも取り込まない
+  if (!isOutbound && isExcludedSender(parsed.from.email, state.excludedSenders)) {
+    const reason = "設定で除外した送信者";
+    await prisma.senderVerdict.upsert({
+      where: { userId_email: { userId, email: parsed.from.email } },
+      create: { userId, email: parsed.from.email, domain: extractDomain(parsed.from.email), kind: "NOT_AGENT", reason },
+      update: { kind: "NOT_AGENT", reason },
+    });
+    return "skipped";
+  }
 
   const existingThread = await prisma.thread.findUnique({
     where: { userId_gmailThreadId: { userId, gmailThreadId: parsed.gmailThreadId } },
@@ -356,7 +366,10 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
     sleep: deps.sleep,
     deadline: deps.deadline,
   });
-  const agents = await prisma.agent.findMany({ where: { userId } });
+  const [agents, policy] = await Promise.all([
+    prisma.agent.findMany({ where: { userId } }),
+    prisma.replyPolicy.findUnique({ where: { userId }, select: { excludedSenders: true } }),
+  ]);
   const domainToAgent = new Map<string, Agent>();
   for (const agent of agents) {
     for (const domain of agent.domains) domainToAgent.set(domain.toLowerCase(), agent);
@@ -368,6 +381,7 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
     domainToAgent,
     senderChecks: 0,
     senderCheckLimit: env.SENDER_CHECKS_PER_SYNC,
+    excludedSenders: policy?.excludedSenders ?? [],
     deferredFrom: null,
     result,
   };

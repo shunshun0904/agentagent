@@ -271,6 +271,13 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               <textarea name="customInstructions" defaultValue={policy.customInstructions ?? ""} rows={4} className="input" />
             </Field>
 
+            <Field
+              label="除外する送信者"
+              hint="1 行に 1 つ。メールアドレス(例: levtech-direct@levtech.jp)またはドメイン(例: scout.example.com)。登録済みのエージェントと同じドメインでも、ここに書いた送信者のメールは取り込みません。一斉配信・自動送信・no-reply のメールは設定に関係なく取り込みません。"
+            >
+              <textarea name="excludedSenders" defaultValue={policy.excludedSenders.join("\n")} rows={4} className="input font-mono text-xs" />
+            </Field>
+
             <SubmitButton>返信ポリシーを保存</SubmitButton>
           </form>
         </Card>

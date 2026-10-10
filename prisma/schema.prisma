@@ -221,6 +221,8 @@ model ReplyPolicy {
   maxDelayMinutes               Int        @default(90)
   replyAll                      Boolean    @default(true)
   customInstructions            String?
+  /// 取り込まない送信者(メールアドレスまたはドメイン)。既知のエージェントのドメインでも除外する
+  excludedSenders               String[]   @default([])
   createdAt                     DateTime   @default(now())
   updatedAt                     DateTime   @updatedAt
 }

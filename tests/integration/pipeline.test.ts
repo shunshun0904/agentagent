@@ -292,10 +292,10 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     const r = await runTick(userId, deps());
     expect(r.skipped).toBeNull();
     expect(r.errors).toEqual([]);
-    expect(r.sync?.ingested).toBe(5); // m3 以外
-    expect(r.sync?.skipped).toBe(1);
+    expect(r.sync?.ingested).toBe(4); // m3(エージェント以外)と m2(一斉配信)以外
+    expect(r.sync?.skipped).toBe(2);
     expect(r.sync?.newAgents).toBe(2);
-    expect(r.process?.processed).toBe(4); // m6, m4, m2, m1(m5 は送信メール)
+    expect(r.process?.processed).toBe(3); // m6, m4, m1(m5 は送信メール)
 
     const agents = await prisma.agent.findMany({ where: { userId }, orderBy: { name: "asc" } });
     expect(agents.map((a) => a.domains[0]).sort()).toEqual([AGENT_DOMAIN, OTHER_DOMAIN].sort());
@@ -307,8 +307,8 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     // 返信済みのスレッド2には返信案を作らない
     expect(byGmail.t2?.replies).toHaveLength(0);
     expect(byGmail.t2?.status).toBe("WAITING_THEM");
-    // 一斉配信には返信しない
-    expect(byGmail.t4?.replies).toHaveLength(0);
+    // 一斉配信は既知ドメインでも取り込まない
+    expect(byGmail.t4).toBeUndefined();
 
     // スレッド1: 新規エージェントへの初回返信なので承認制
     const r1 = byGmail.t1?.replies ?? [];
@@ -332,9 +332,9 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     expect(account.lastSyncedAt).not.toBeNull();
     expect(account.syncedLookbackDays).toBe(30);
 
-    // 除外したメール(m3)は記録し、次回以降は取得し直さない
+    // 除外したメール(m2、m3)は記録し、次回以降は取得し直さない
     const skipped = await prisma.skippedMessage.findMany({ where: { userId } });
-    expect(skipped.map((x) => x.gmailMessageId)).toEqual(["m3"]);
+    expect(skipped.map((x) => x.gmailMessageId).sort()).toEqual(["m2", "m3"]);
   });
 
   it("新着メールで古い返信案を取り消し、条件を満たせば自動送信を予約する", async () => {
@@ -414,26 +414,23 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     expect(r2.process?.processed).toBe(1);
   });
 
-  it("一斉配信でも担当者のアドレスは AI で判定し、no-reply は判定せずに除外する", async () => {
+  it("一斉配信と no-reply のメールは、AI で判定せずに除外する", async () => {
     const bulk = [{ name: "List-Unsubscribe", value: "<mailto:unsubscribe@example.com>" }];
     box.messages.push(
       mail({ id: "m9", threadId: "t7", from: `田中 <tanaka@${THIRD_DOMAIN}>`, subject: "【案件のご紹介】React案件", body: "新着案件です", minutesAgo: 30, extraHeaders: bulk }),
-      mail({ id: "m10", threadId: "t8", from: "お知らせ <noreply@service.example.com>", subject: "お知らせ", body: "キャンペーン", minutesAgo: 20, extraHeaders: bulk }),
+      mail({ id: "m10", threadId: "t8", from: "お知らせ <noreply@service.example.com>", subject: "お知らせ", body: "キャンペーン", minutesAgo: 20 }),
     );
     const checksBefore = ai.calls.checkSender;
 
     const r = await runTick(userId, deps());
     expect(r.errors).toEqual([]);
-    expect(r.sync?.ingested).toBe(1);
-    expect(r.sync?.skipped).toBe(1);
-    expect(r.sync?.newAgents).toBe(1);
-    expect(ai.calls.checkSender - checksBefore).toBe(1); // m9 だけ AI で判定
-
-    const agent = await prisma.agent.findFirst({ where: { userId, domains: { has: THIRD_DOMAIN } } });
-    expect(agent).not.toBeNull();
-    const verdict = await prisma.senderVerdict.findUniqueOrThrow({ where: { userId_email: { userId, email: "noreply@service.example.com" } } });
-    expect(verdict.kind).toBe("NOT_AGENT");
-    expect(verdict.reason).toBe("自動送信または no-reply のアドレス");
+    expect(r.sync?.ingested).toBe(0);
+    expect(r.sync?.skipped).toBe(2);
+    expect(r.sync?.newAgents).toBe(0);
+    expect(ai.calls.checkSender - checksBefore).toBe(0);
+    expect(await prisma.agent.findFirst({ where: { userId, domains: { has: THIRD_DOMAIN } } })).toBeNull();
+    // 判定結果は記録しない(同じ送信者から個別のメールが届けば、あらためて判定する)
+    expect(await prisma.senderVerdict.count({ where: { userId, email: { in: [`tanaka@${THIRD_DOMAIN}`, "noreply@service.example.com"] } } })).toBe(0);
   });
 
   it("同期位置を戻しても、取り込み済みと除外済みのメールは取得し直さない", async () => {
@@ -510,30 +507,29 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     expect(box.queries.at(-1)).toMatch(/after:\d+/);
   });
 
-  it("旧バージョンが一斉配信として除外した送信者は、AI で判定し直す", async () => {
-    const email = `yamamoto@${FOURTH_DOMAIN}`;
-    await prisma.senderVerdict.create({
-      data: { userId, email, domain: FOURTH_DOMAIN, kind: "NOT_AGENT", reason: "一斉配信または自動送信アドレス" },
-    });
+  it("設定で除外した送信者は、登録済みエージェントのドメインでも取り込まない", async () => {
+    const excluded = `direct@${AGENT_DOMAIN}`;
+    await prisma.replyPolicy.update({ where: { userId }, data: { excludedSenders: [excluded] } });
     box.messages.push(
-      mail({
-        id: "m14",
-        threadId: "t12",
-        from: `山本 <${email}>`,
-        subject: "【案件のご紹介】Python案件",
-        body: "新着案件です",
-        minutesAgo: 2,
-        extraHeaders: [{ name: "List-Unsubscribe", value: "<mailto:unsubscribe@example.com>" }],
-      }),
+      // 新しいスレッド(ドメインは登録済みエージェントと同じ)
+      mail({ id: "m14", threadId: "t12", from: `スカウト <${excluded}>`, subject: "【転職】スカウトのご案内", body: "年収アップ", minutesAgo: 2 }),
+      // 既存のスレッド(t1)への返信
+      mail({ id: "m14b", threadId: "t1", from: `スカウト <${excluded}>`, subject: "Re: 【案件のご紹介】Go案件", body: "別件です", minutesAgo: 1, inReplyTo: "<m7@mail.test>" }),
     );
     const checksBefore = ai.calls.checkSender;
+    const messagesBefore = await prisma.message.count({ where: { thread: { userId } } });
 
     const r = await runTick(userId, deps());
     expect(r.errors).toEqual([]);
-    expect(r.sync?.ingested).toBe(1);
-    expect(ai.calls.checkSender - checksBefore).toBe(1);
-    const verdict = await prisma.senderVerdict.findUniqueOrThrow({ where: { userId_email: { userId, email } } });
-    expect(verdict.kind).toBe("AGENT");
+    expect(r.sync?.ingested).toBe(0);
+    expect(r.sync?.skipped).toBe(2);
+    expect(ai.calls.checkSender - checksBefore).toBe(0);
+    expect(await prisma.message.count({ where: { thread: { userId } } })).toBe(messagesBefore);
+    expect(await prisma.thread.findFirst({ where: { userId, gmailThreadId: "t12" } })).toBeNull();
+    const verdict = await prisma.senderVerdict.findUniqueOrThrow({ where: { userId_email: { userId, email: excluded } } });
+    expect(verdict.reason).toBe("設定で除外した送信者");
+
+    await prisma.replyPolicy.update({ where: { userId }, data: { excludedSenders: [] } });
   });
 
   it("Anthropic API キーが無効なときは、メールを未処理のまま残し、キーを直した後に処理する", async () => {

@@ -52,6 +52,7 @@ export const DEFAULT_POLICY = {
   maxDelayMinutes: 90,
   replyAll: true,
   customInstructions: null as string | null,
+  excludedSenders: [] as string[],
 };
 
 /** プロフィールと返信ポリシーが無ければ既定値で作成する */
