@@ -63,7 +63,9 @@ Google Cloud の利用には請求先アカウント(クレジットカード)�
 | アプリの接続 | Transaction pooler | 6543 | `DATABASE_URL` |
 | マイグレーション | Session pooler | 5432 | `DIRECT_URL` |
 
-`[YOUR-PASSWORD]` の部分は手順 2 のパスワードに置き換えます。「Direct connection」(`db.xxxx.supabase.co`)は IPv6 専用のため、Cloud Run からは使いません。
+`[YOUR-PASSWORD]` の部分は手順 2 のパスワードに置き換えます。前後の `[ ]` も消します。「Direct connection」(`db.xxxx.supabase.co`)は IPv6 専用のため、Cloud Run からは使えません。
+
+パスワードは英数字だけにすると、接続文字列をそのまま使えます。セットアップスクリプトは、`[ ]` の消し忘れや記号の入ったパスワードを自動で直し、デプロイの前に実際に接続できるかを確認します。
 
 テーブルは、アプリの初回起動時に自動で作られます(マイグレーション)。全テーブルで行レベルセキュリティ(RLS)を有効にし、Supabase の Data API からは読めないようにしています。Data API を使わないので、「Project Settings」→「Data API」で無効にしておくとより安全です。
 
@@ -129,8 +131,8 @@ bash scripts/gcp/setup.sh
 
 1. 必要な API(Cloud Run、Cloud Build、Artifact Registry、Secret Manager、Cloud Scheduler、IAM、Gmail)の有効化
 2. 実行用サービスアカウント `agentagent-run` の作成と、シークレットの読み取り権限の付与
-3. シークレットの登録
-4. Cloud Run へのデプロイ(東京リージョン、未認証アクセス許可、メモリ 1 GiB、タイムアウト 15 分、インスタンス 0〜2)
+3. シークレットの登録と、DB 接続文字列での接続確認(失敗したら理由を表示し、その場で入力し直せる)
+4. Cloud Run へのデプロイ(東京リージョン、未認証アクセス許可、メモリ 1 GiB、タイムアウト 15 分、インスタンス 0〜2)。失敗した場合は Cloud Run のログを表示する
 5. Cloud Scheduler のジョブ `agentagent-tick` の登録(5 分ごと、東京時間)
 6. Artifact Registry の古いイメージの自動削除設定
 
@@ -156,7 +158,7 @@ bash scripts/gcp/setup.sh
 | コードを更新して再デプロイ | Cloud Shell で `git pull` の後 `bash scripts/gcp/deploy.sh` |
 | API キーなどの変更 | `bash scripts/gcp/set-secret.sh ANTHROPIC_API_KEY`(対象は DATABASE_URL、DIRECT_URL、GOOGLE_CLIENT_SECRET、ANTHROPIC_API_KEY、CRON_SECRET) |
 | ログイン許可アドレスやモデルの変更 | `ALLOWED_GOOGLE_EMAILS=... bash scripts/gcp/setup.sh` のように環境変数を付けて再実行 |
-| 動作ログの確認 | Cloud Run のサービス画面の「ログ」タブ。アプリ内の「活動ログ」画面でも確認できる |
+| 動作ログの確認 | Cloud Shell で `bash scripts/gcp/logs.sh`。Cloud Run のサービス画面の「ログ」タブや、アプリ内の「活動ログ」画面でも確認できる |
 | 定期実行を一時停止 | Cloud Scheduler のジョブ `agentagent-tick` を「一時停止」 |
 | 定期実行を今すぐ実行 | Cloud Scheduler のジョブで「強制実行」、またはアプリの「今すぐ同期」 |
 | 完全に止める | Cloud Scheduler のジョブと Cloud Run のサービスを削除する |
@@ -177,6 +179,7 @@ GitHub に push するたびに自動でデプロイしたい場合は、Cloud R
 
 | 症状 | 原因と対処 |
 | --- | --- |
+| デプロイで `failed to start and listen on the port` | 起動時のテーブル作成(マイグレーション)で DB に接続できていない。Cloud Shell の `agentagent` ディレクトリで `git pull` してから `bash scripts/gcp/setup.sh` を再実行する。接続を確認し、失敗した場合は理由を表示して入力し直せる。ログは `bash scripts/gcp/logs.sh` で見られる |
 | ログイン時に `redirect_uri_mismatch` | OAuth クライアントのリダイレクト URI が違う。セットアップの最後に表示された URI を登録する |
 | ログイン後に「ログインの検証に失敗しました」 | アプリの URL とは別の URL で開いている。セットアップで表示された URL から開き直す |
 | 「このアカウントはログインを許可されていません」 | `ALLOWED_GOOGLE_EMAILS` に含まれていない。環境変数を付けて setup.sh を再実行する |

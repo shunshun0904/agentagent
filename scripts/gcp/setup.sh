@@ -15,6 +15,7 @@
 #
 # 入力は対話形式で聞く。環境変数で事前に渡すこともできる(例: ANTHROPIC_API_KEY=... bash scripts/gcp/setup.sh)。
 # 登録済みのシークレットを変更するときは UPDATE_SECRETS=true を付けて実行する。
+# デプロイの前に、DB 接続文字列で実際に接続できるかを psql で確認する(SKIP_DB_CHECK=true で省略)。
 #
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -26,10 +27,12 @@ TICK_TIME_BUDGET_SECONDS="${TICK_TIME_BUDGET_SECONDS:-240}"
 DATABASE_SSL="${DATABASE_SSL:-no-verify}"
 UPDATE_SECRETS="${UPDATE_SECRETS:-false}"
 SKIP_HEALTH_CHECK="${SKIP_HEALTH_CHECK:-false}"
+SKIP_DB_CHECK="${SKIP_DB_CHECK:-false}"
 
 command -v gcloud >/dev/null || die "gcloud が見つかりません。Google Cloud の Cloud Shell で実行してください"
 command -v python3 >/dev/null || die "python3 が見つかりません"
 command -v openssl >/dev/null || die "openssl が見つかりません"
+command -v psql >/dev/null || warn "psql が見つかりません。データベースへの接続確認を省略します"
 
 require_project
 info "プロジェクト: ${PROJECT_ID}(番号 ${PROJECT_NUMBER}) / リージョン: ${REGION} / サービス: ${SERVICE}"
@@ -70,39 +73,21 @@ ok "  実行用サービスアカウント: ${RUNTIME_SA}"
 info "[3/6] シークレットを登録しています"
 SECRET_FLAGS=()
 
-prompt_value() {
-  local label="$1" value=""
-  read -r -s -p "  ${label}: " value
-  echo >&2
-  printf '%s' "${value}"
-}
-
-validate_secret() {
+# 入力値を検査する。DB 接続文字列は正規化した値を返す(問題があれば理由を表示して失敗する)
+prepare_value() {
   local env_name="$1" value="$2"
   case "${env_name}" in
     DATABASE_URL | DIRECT_URL)
-      [[ "${value}" =~ ^postgres(ql)?:// ]] || die "${env_name} は postgresql:// で始まる接続文字列にしてください"
-      [[ "${value}" != *"[YOUR-PASSWORD]"* ]] || die "${env_name} の [YOUR-PASSWORD] を実際のパスワードに置き換えてください"
-      if [[ "${env_name}" == "DATABASE_URL" && "${value}" != *":6543/"* ]]; then
-        warn "DATABASE_URL は Supabase の Transaction pooler(ポート 6543)を推奨します"
-      fi
-      if [[ "${env_name}" == "DIRECT_URL" && "${value}" == *":6543/"* ]]; then
-        die "DIRECT_URL には Session pooler(ポート 5432)の接続文字列を指定してください(マイグレーションに使います)"
-      fi
+      normalize_db_url "${env_name}" "${value}"
       ;;
     ANTHROPIC_API_KEY)
       [[ "${value}" == sk-ant-* ]] || warn "ANTHROPIC_API_KEY が sk-ant- で始まっていません。値を確認してください"
+      printf '%s' "${value}"
+      ;;
+    *)
+      printf '%s' "${value}"
       ;;
   esac
-}
-
-# DIRECT_URL はマイグレーション(Prisma CLI)が使う。TLS を必須にする(証明書の検証は Prisma の既定どおり行わない)
-normalize_direct_url() {
-  local value="$1"
-  if [[ "${value}" != *"sslmode="* ]]; then
-    if [[ "${value}" == *"?"* ]]; then value="${value}&sslmode=require"; else value="${value}?sslmode=require"; fi
-  fi
-  printf '%s' "${value}"
 }
 
 # ensure_secret 環境変数名 モード(prompt|generate|optional) 説明
@@ -135,13 +120,16 @@ ensure_secret() {
           ;;
       esac
     fi
-    [[ -n "${value}" ]] || die "${label} が空です"
-    validate_secret "${env_name}" "${value}"
-    if [[ "${env_name}" == "DIRECT_URL" ]]; then value="$(normalize_direct_url "${value}")"; fi
-    if [[ "${exists}" == false ]]; then
-      gcloud secrets create "${secret_id}" --replication-policy automatic --project "${PROJECT_ID}" --quiet >/dev/null
-    fi
-    printf '%s' "${value}" | gcloud secrets versions add "${secret_id}" --data-file=- --project "${PROJECT_ID}" --quiet >/dev/null
+    local prepared attempts=0
+    while [[ -z "${value}" ]] || ! prepared="$(prepare_value "${env_name}" "${value}")"; do
+      attempts=$((attempts + 1))
+      if [[ "${mode}" == "prompt" ]] && is_interactive && [[ ${attempts} -lt 4 ]]; then
+        value="$(prompt_value "${label} を入力し直してください")"
+      else
+        die "${label} が正しくありません"
+      fi
+    done
+    write_secret "${secret_id}" "${prepared}"
     ok "  - ${secret_id}: 登録しました"
   else
     ok "  - ${secret_id}: 登録済み"
@@ -155,6 +143,34 @@ ensure_secret() {
   SECRET_FLAGS+=("${env_name}=${secret_id}:latest")
 }
 
+# 登録済みの DB 接続文字列を検査・修正し、実際に接続できるか確認する。
+# 接続できなければ理由を表示し、対話中なら入力し直してもらう。
+verify_db_secret() {
+  local env_name="$1" label="$2"
+  local secret_id stored value fixed attempt
+  secret_id="$(secret_id_for "${env_name}")"
+  stored="$(read_secret "${secret_id}")" || die "${secret_id} を読み取れません"
+  value="${stored}"
+  for attempt in 1 2 3 4; do
+    if fixed="$(normalize_db_url "${env_name}" "${value}")"; then
+      value="${fixed}"
+      if [[ "${value}" != "${stored}" ]]; then
+        write_secret "${secret_id}" "${value}"
+        stored="${value}"
+        ok "  - ${secret_id}: 接続文字列を保存し直しました"
+      fi
+      if check_db_connection "${env_name}" "${value}"; then
+        return 0
+      fi
+    fi
+    if ! is_interactive || [[ ${attempt} -ge 4 ]]; then
+      die "${env_name} でデータベースに接続できません。接続文字列を確認して、もう一度 bash scripts/gcp/setup.sh を実行してください"
+    fi
+    value="$(prompt_value "${label} を入力し直してください")"
+    [[ -n "${value}" ]] || die "値が空です"
+  done
+}
+
 ensure_secret DATABASE_URL prompt "Supabase の Transaction pooler の接続文字列(ポート 6543、パスワード入り)"
 ensure_secret DIRECT_URL prompt "Supabase の Session pooler の接続文字列(ポート 5432、パスワード入り)"
 ensure_secret GOOGLE_CLIENT_SECRET prompt "Google OAuth クライアントシークレット"
@@ -164,6 +180,10 @@ ensure_secret CRON_SECRET generate "定期実行の認証シークレット(自�
 if [[ "${DATABASE_SSL}" == "verify" ]]; then
   ensure_secret DATABASE_CA_CERT prompt "Supabase の CA 証明書(PEM の内容)"
 fi
+
+info "  データベースへの接続を確認しています"
+verify_db_secret DIRECT_URL "Supabase の Session pooler の接続文字列(ポート 5432、パスワード入り)"
+verify_db_secret DATABASE_URL "Supabase の Transaction pooler の接続文字列(ポート 6543、パスワード入り)"
 
 # ---------------------------------------------------------------------------
 info "[4/6] Cloud Run にデプロイしています(ビルドを含め 5〜10 分程度かかります)"
@@ -190,7 +210,7 @@ APP_URL="${APP_URL:-${DEFAULT_APP_URL}}"
 ENV_VARS="^##^APP_URL=${APP_URL}##GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}##ALLOWED_GOOGLE_EMAILS=${ALLOWED_GOOGLE_EMAILS}##DATABASE_SSL=${DATABASE_SSL}##AGENTAGENT_MODEL=${AGENTAGENT_MODEL}##TICK_TIME_BUDGET_SECONDS=${TICK_TIME_BUDGET_SECONDS}"
 SECRETS_ARG="$(IFS=,; echo "${SECRET_FLAGS[*]}")"
 
-gcloud run deploy "${SERVICE}" \
+if ! gcloud run deploy "${SERVICE}" \
   --source "${REPO_ROOT}" \
   --region "${REGION}" \
   --project "${PROJECT_ID}" \
@@ -204,7 +224,11 @@ gcloud run deploy "${SERVICE}" \
   --max-instances 2 \
   --set-env-vars "${ENV_VARS}" \
   --set-secrets "${SECRETS_ARG}" \
-  --quiet
+  --quiet; then
+  warn "デプロイに失敗しました。Cloud Run の直近のログを表示します"
+  print_recent_logs 60 >&2
+  die "上のログの [entrypoint] で始まる行に原因が出ています。解決しない場合は、このログを共有してください"
+fi
 
 # 決定的 URL が割り当てられていなければ、実際の URL を APP_URL に設定し直す
 mapfile -t urls < <(service_urls)

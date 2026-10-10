@@ -62,6 +62,8 @@ scripts/
   gcp/setup.sh           Google Cloud のセットアップ(Cloud Shell で実行)
   gcp/deploy.sh          再デプロイ
   gcp/set-secret.sh      シークレットの変更
+  gcp/logs.sh            Cloud Run のログ表示
+  gcp/dburl.py           Supabase の接続文字列の検査と正規化
   worker.ts              定期処理のワーカー(ローカル開発用)
   seed.ts                デモデータ投入
 src/

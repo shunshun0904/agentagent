@@ -89,3 +89,80 @@ for u in urls:
         print(u)
 ' || true
 }
+
+# Cloud Run の最近のログを古い順に表示する
+print_recent_logs() {
+  local limit="${1:-80}"
+  gcloud logging read \
+    "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"${SERVICE}\"" \
+    --project "${PROJECT_ID}" \
+    --limit "${limit}" \
+    --freshness "${LOG_FRESHNESS:-1d}" \
+    --format 'value(timestamp.date("%Y-%m-%d %H:%M:%S"), resource.labels.revision_name, textPayload)' 2>/dev/null | tac || true
+}
+
+# 接続文字列を検査・正規化する(問題があれば理由を表示して失敗する)
+normalize_db_url() {
+  local kind="$1" value="$2"
+  python3 "${REPO_ROOT}/scripts/gcp/dburl.py" normalize "${kind}" "${value}"
+}
+
+# 標準入力が端末か(対話入力できるか)
+is_interactive() { [[ -t 0 ]]; }
+
+# 画面に表示せずに値を入力させる(入力した値を標準出力に返す)
+prompt_value() {
+  local label="$1" value=""
+  read -r -s -p "  ${label}: " value
+  echo >&2
+  printf '%s' "${value}"
+}
+
+read_secret() {
+  gcloud secrets versions access latest --secret "$1" --project "${PROJECT_ID}" 2>/dev/null
+}
+
+# Secret Manager に新しいバージョンとして保存する(シークレットが無ければ作る)
+write_secret() {
+  local secret_id="$1" value="$2"
+  if ! gcloud secrets describe "${secret_id}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
+    gcloud secrets create "${secret_id}" --replication-policy automatic --project "${PROJECT_ID}" --quiet >/dev/null
+  fi
+  printf '%s' "${value}" | gcloud secrets versions add "${secret_id}" --data-file=- --project "${PROJECT_ID}" --quiet >/dev/null
+}
+
+# psql のエラー内容から原因の見当を表示する
+explain_db_error() {
+  local out="$1"
+  case "${out}" in
+    *"password authentication failed"*)
+      warn "パスワードが違います。Supabase の「Reset database password」で設定したパスワードか確認してください" ;;
+    *"Tenant or user not found"*)
+      warn "ユーザー名またはプロジェクトが見つかりません。Supabase の「Connect」画面の文字列をそのまま使ってください" ;;
+    *"could not translate host name"* | *"Name or service not known"*)
+      warn "ホスト名が見つかりません。接続文字列のホスト名を確認してください" ;;
+    *"Network is unreachable"* | *"timeout expired"* | *"timed out"* | *"Connection refused"*)
+      warn "接続先に届きません。ホスト名とポート番号を確認してください" ;;
+    *)
+      warn "データベースに接続できませんでした" ;;
+  esac
+}
+
+# 接続文字列で実際に接続できるか確認する(psql が無ければ確認を省略して成功扱い)
+check_db_connection() {
+  local name="$1" url="$2" out
+  if [[ "${SKIP_DB_CHECK:-false}" == "true" ]]; then
+    return 0
+  fi
+  if ! command -v psql >/dev/null 2>&1; then
+    warn "psql が見つからないため、${name} の接続確認を省略します"
+    return 0
+  fi
+  if out="$(PGCONNECT_TIMEOUT=15 psql "$(python3 "${REPO_ROOT}/scripts/gcp/dburl.py" libpq "${url}")" -X -tAc 'select 1' 2>&1)"; then
+    ok "  - ${name}: 接続できました($(python3 "${REPO_ROOT}/scripts/gcp/dburl.py" describe "${url}"))"
+    return 0
+  fi
+  printf '%s\n' "${out}" | sed 's/^/      /' >&2
+  explain_db_error "${out}"
+  return 1
+}

@@ -66,6 +66,7 @@ bash scripts/gcp/setup.sh
 | 初回セットアップ・設定変更 | `bash scripts/gcp/setup.sh` |
 | コード更新後の再デプロイ | `bash scripts/gcp/deploy.sh` |
 | API キーなどの変更 | `bash scripts/gcp/set-secret.sh ANTHROPIC_API_KEY` |
+| Cloud Run のログを見る | `bash scripts/gcp/logs.sh` |
 
 ## 技術スタック
 

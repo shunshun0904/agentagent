@@ -17,13 +17,13 @@ secret_id="$(secret_id_for "${name}")" || die "未対応の名前です: ${name}
 gcloud secrets describe "${secret_id}" --project "${PROJECT_ID}" >/dev/null 2>&1 ||
   die "シークレット ${secret_id} がありません。先に bash scripts/gcp/setup.sh を実行してください"
 
-read -r -s -p "${name} の新しい値: " value
-echo
+value="$(prompt_value "${name} の新しい値")"
 [[ -n "${value}" ]] || die "値が空です"
-if [[ "${name}" == "DIRECT_URL" && "${value}" != *"sslmode="* ]]; then
-  if [[ "${value}" == *"?"* ]]; then value="${value}&sslmode=require"; else value="${value}?sslmode=require"; fi
+if [[ "${name}" == "DATABASE_URL" || "${name}" == "DIRECT_URL" ]]; then
+  value="$(normalize_db_url "${name}" "${value}")" || die "${name} の形式が正しくありません"
+  check_db_connection "${name}" "${value}" || die "${name} でデータベースに接続できないため、保存しませんでした"
 fi
-printf '%s' "${value}" | gcloud secrets versions add "${secret_id}" --data-file=- --project "${PROJECT_ID}" --quiet >/dev/null
+write_secret "${secret_id}" "${value}"
 ok "${secret_id} を更新しました"
 
 # 新しいリビジョンを作り、最新のシークレットを読み込ませる

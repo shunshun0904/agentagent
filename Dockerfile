@@ -48,4 +48,5 @@ COPY --chown=nextjs:nodejs docker/entrypoint.sh ./entrypoint.sh
 
 USER nextjs
 EXPOSE 8080
-CMD ["./entrypoint.sh"]
+# 実行権限に依存しないよう sh で起動する
+CMD ["sh", "/app/entrypoint.sh"]
