@@ -43,7 +43,7 @@ flowchart LR
 | スタイル | Tailwind CSS 4 | `src/app/globals.css` に共通部品(`.input` `.btn-*`)を定義 |
 | DB | PostgreSQL(本番は Supabase)、Prisma 7(`prisma-client` ジェネレータ + `@prisma/adapter-pg`) | クライアントは `src/generated/prisma` に生成(git 管理外) |
 | メール | Gmail API(`googleapis`) | OAuth 2.0、スコープ `gmail.modify` |
-| AI | Anthropic SDK(`@anthropic-ai/sdk`)、構造化出力(zod) | 既定モデル `claude-opus-5-5`。詳細は `03_ai_design.md` |
+| AI | Anthropic SDK(`@anthropic-ai/sdk`)、構造化出力(zod) | 既定モデル `claude-haiku-5-5`。詳細は `03_ai_design.md` |
 | 実行環境 | Cloud Run、Cloud Scheduler、Secret Manager、Cloud Build、Artifact Registry | 東京リージョン(asia-northeast1) |
 | テスト | Vitest | 純粋ロジックのユニットテストと、実 DB で偽の Gmail・AI を使う結合テスト |
 | 実行 | Node.js 22 | ワーカーとシードは `tsx` で実行 |
@@ -261,7 +261,7 @@ erDiagram
 | GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET | Gmail 連携に必須 | Google Cloud の OAuth クライアント |
 | ALLOWED_GOOGLE_EMAILS | 本番では必須 | ログインを許可するメール(カンマ区切り) |
 | ANTHROPIC_API_KEY | AI 機能に必須 | Anthropic API キー |
-| AGENTAGENT_MODEL | 任意 | 既定 `claude-opus-5-5` |
+| AGENTAGENT_MODEL | 任意 | 既定 `claude-haiku-5-5`(`claude-sonnet-5-5`、`claude-opus-5-5` も指定できる) |
 | AGENTAGENT_DRAFT_EFFORT / AGENTAGENT_ANALYSIS_EFFORT | 任意 | 既定 `medium` / `low` |
 | CRON_SECRET | cron 利用時に必須 | cron エンドポイントの認証 |
 | TICK_TIME_BUDGET_SECONDS | 任意 | 1 回の定期処理の時間予算(既定 240 秒) |

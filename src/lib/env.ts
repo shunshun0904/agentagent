@@ -14,7 +14,7 @@ const EnvSchema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   ALLOWED_GOOGLE_EMAILS: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
-  AGENTAGENT_MODEL: z.string().default("claude-opus-5-5"),
+  AGENTAGENT_MODEL: z.string().default("claude-haiku-5-5"),
   AGENTAGENT_DRAFT_EFFORT: EffortSchema.default("medium"),
   AGENTAGENT_ANALYSIS_EFFORT: EffortSchema.default("low"),
   CRON_SECRET: z.string().optional(),

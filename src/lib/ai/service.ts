@@ -27,7 +27,8 @@ export const defaultAiService: AiService = {
       system: ANALYSIS_SYSTEM_PROMPT,
       user: buildAnalysisUserContent(input),
       effort: getEnv().AGENTAGENT_ANALYSIS_EFFORT,
-      maxTokens: 4000,
+      // 思考(thinking)の分も max_tokens に含まれるため、出力の見込みより大きくとる
+      maxTokens: 6000,
     });
   },
   draftReply(input) {
@@ -36,7 +37,7 @@ export const defaultAiService: AiService = {
       system: DRAFT_SYSTEM_PROMPT,
       user: buildDraftUserContent(input),
       effort: getEnv().AGENTAGENT_DRAFT_EFFORT,
-      maxTokens: 6000,
+      maxTokens: 8000,
     });
   },
   checkSender(input) {
@@ -45,7 +46,7 @@ export const defaultAiService: AiService = {
       system: SENDER_CHECK_SYSTEM_PROMPT,
       user: buildSenderCheckUserContent(input),
       effort: "low",
-      maxTokens: 1000,
+      maxTokens: 2000,
     });
   },
 };

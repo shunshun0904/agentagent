@@ -4,7 +4,7 @@ import type { z } from "zod";
 import { getEnv, type EffortLevel } from "@/lib/env";
 
 /** プロンプトを変更したら更新する。返信案に記録され、後から比較できる。 */
-export const PROMPT_VERSION = "2026-10-09.1";
+export const PROMPT_VERSION = "2026-10-10.1";
 
 export type AiErrorCode = "not_configured" | "refusal" | "max_tokens" | "parse_failed";
 

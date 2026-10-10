@@ -60,7 +60,7 @@ bash scripts/gcp/setup.sh
 4. OAuth 同意画面の「ブランディング」にアプリのホームページ、プライバシーポリシー(`/privacy`)、利用規約(`/terms`)の URL を入力し、「対象」で公開ステータスを「本番環境」にする(入力する値はセットアップの最後に表示されます)
 5. 表示された URL を開いて Google でログインし、設定画面でプロフィールと返信ポリシーを入力する
 
-セットアップスクリプトは、API の有効化、シークレットの登録、Cloud Run へのデプロイ、5 分ごとの定期実行(Cloud Scheduler)の登録までを行います。個人利用の範囲なら Google Cloud と Supabase は無料枠に収まる見込みで、Claude API の利用料(メール 1 通あたり約 0.05 ドル)が主な費用です。
+セットアップスクリプトは、API の有効化、シークレットの登録、Cloud Run へのデプロイ、5 分ごとの定期実行(Cloud Scheduler)の登録までを行います。個人利用の範囲なら Google Cloud と Supabase は無料枠に収まる見込みで、Claude API の利用料(既定の Haiku 5.5 でメール 1 通あたり約 0.002 ドル)が主な費用です。
 
 | 作業 | コマンド(Cloud Shell) |
 | --- | --- |
@@ -75,7 +75,7 @@ bash scripts/gcp/setup.sh
 | --- | --- |
 | アプリ | Next.js 16(App Router)/ React 19 / TypeScript / Tailwind CSS 4 |
 | DB | PostgreSQL(Supabase)/ Prisma 7 |
-| AI | Anthropic SDK(Claude、既定モデル `claude-opus-5-5`) |
+| AI | Anthropic SDK(Claude、既定モデル `claude-haiku-5-5`) |
 | メール | Gmail API(googleapis) |
 | 実行環境 | Google Cloud Run(コンテナ)/ Cloud Scheduler / Secret Manager / Cloud Build |
 | テスト | Vitest(ユニットテストと、実 DB を使う結合テスト) |
