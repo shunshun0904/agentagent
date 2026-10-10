@@ -44,6 +44,10 @@ async function main() {
     try {
       const results = await runTickForAllUsers();
       for (const r of results) {
+        if (r.skipped === "locked") {
+          console.log(`[worker] user=${r.userId} 別の処理が実行中のためスキップしました`);
+          continue;
+        }
         const sync = r.sync ? `取込 ${r.sync.ingested}/除外 ${r.sync.skipped}` : "同期なし";
         const proc = r.process ? `処理 ${r.process.processed}(自動 ${r.process.autoScheduled}/承認 ${r.process.needsApproval}/不要 ${r.process.noReply}/失敗 ${r.process.errors})` : "処理なし";
         const disp = r.dispatch ? `送信 ${r.dispatch.sent}/失敗 ${r.dispatch.failed}` : "送信なし";

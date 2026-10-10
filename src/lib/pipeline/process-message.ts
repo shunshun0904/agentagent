@@ -1,5 +1,6 @@
 import type { Agent, Message, Prisma, ReplyPolicy, Thread } from "@/generated/prisma/client";
 import { prisma } from "@/lib/db";
+import { getEnv } from "@/lib/env";
 import { logActivity } from "@/lib/activity";
 import { AiError, PROMPT_VERSION } from "@/lib/ai/client";
 import { defaultAiService, type AiService } from "@/lib/ai/service";
@@ -17,11 +18,15 @@ export type ProcessResult = {
   needsApproval: number;
   noReply: number;
   errors: number;
+  /** 時間切れで次回に回した件数 */
+  deferred: number;
 };
 
 export type ProcessOptions = {
   ai?: AiService;
   limit?: number;
+  /** この時刻(epoch ミリ秒)を過ぎたら新しいメールの処理を始めない */
+  deadline?: number;
   now?: () => Date;
 };
 
@@ -176,8 +181,32 @@ async function processOne(userId: string, message: PendingMessage, ai: AiService
   // 2. 案件の登録
   const opportunityIds = await upsertOpportunities(userId, thread, message, analysis);
 
-  // 3. 返信しない条件の事前判定(返信案の生成を省く)
+  // 3. 既に返信済み、または同じスレッドに新しい受信メールがある場合は返信案を作らない
+  //    (初回同期で過去のメールをまとめて取り込んだ場合や、相手が続けて送ってきた場合)
+  const [laterOutbound, laterInbound] = await Promise.all([
+    prisma.message.count({ where: { threadId: thread.id, direction: "OUTBOUND", sentAt: { gt: message.sentAt } } }),
+    prisma.message.count({ where: { threadId: thread.id, direction: "INBOUND", sentAt: { gt: message.sentAt } } }),
+  ]);
+  if (laterOutbound > 0 || laterInbound > 0) {
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { processingStatus: "PROCESSED", processedAt: now() },
+    });
+    const reason = laterOutbound > 0 ? "このメールには既に返信済みです" : "同じスレッドに新しいメールがあるため、そちらに返信します";
+    await logActivity(userId, {
+      type: "reply.skipped",
+      entityType: "message",
+      entityId: message.id,
+      message: `「${message.subject}」には返信案を作りません: ${reason}`,
+    });
+    result.noReply += 1;
+    result.processed += 1;
+    return;
+  }
+
+  // 4. 返信しない条件の事前判定(返信案の生成を省く)
   const [newAgent, autoRepliesRecent] = await Promise.all([isNewAgent(agent), countAutoRepliesRecent(thread.id, now())]);
+  const ageHours = (now().getTime() - message.sentAt.getTime()) / 3_600_000;
   const baseDecisionInput = {
     policy,
     agent: agent ? { status: agent.status, autoReplyEnabled: agent.autoReplyEnabled, requireApproval: agent.requireApproval } : null,
@@ -188,6 +217,7 @@ async function processOne(userId: string, message: PendingMessage, ai: AiService
     autoRepliesToday: autoRepliesRecent,
     threadMuted: thread.isMuted,
     messageIsAutoSubmitted: message.isAutoSubmitted,
+    staleHours: ageHours >= getEnv().STALE_REPLY_HOURS ? ageHours : null,
   };
   const preDecision = decideReplyAction({ ...baseDecisionInput, draft: null });
   if (preDecision.action === "no_reply") {
@@ -211,7 +241,7 @@ async function processOne(userId: string, message: PendingMessage, ai: AiService
     return;
   }
 
-  // 4. 返信案の生成
+  // 5. 返信案の生成
   const draftResult = await ai.draftReply({
     ...analysisInput,
     policy,
@@ -258,7 +288,7 @@ async function processOne(userId: string, message: PendingMessage, ai: AiService
     data: { summary: draft.thread_summary, status: autoSend ? "OPEN" : "NEEDS_ACTION" },
   });
 
-  // 5. 案件ステージのヒント(手動で動かしていない NEW の案件のみ)
+  // 6. 案件ステージのヒント(手動で動かしていない NEW の案件のみ)
   if (draft.opportunity_stage_hint && draft.opportunity_stage_hint !== "NEW" && opportunityIds.length > 0) {
     await prisma.opportunity.updateMany({
       where: { id: { in: opportunityIds }, stage: "NEW" },
@@ -296,7 +326,7 @@ export async function processPendingMessages(userId: string, options: ProcessOpt
   const ai = options.ai ?? defaultAiService;
   const now = options.now ?? (() => new Date());
   const limit = options.limit ?? 20;
-  const result: ProcessResult = { processed: 0, autoScheduled: 0, needsApproval: 0, noReply: 0, errors: 0 };
+  const result: ProcessResult = { processed: 0, autoScheduled: 0, needsApproval: 0, noReply: 0, errors: 0, deferred: 0 };
 
   const pending = await prisma.message.findMany({
     where: { processingStatus: "PENDING", direction: "INBOUND", thread: { userId } },
@@ -309,7 +339,11 @@ export async function processPendingMessages(userId: string, options: ProcessOpt
     },
   });
 
-  for (const message of pending) {
+  for (const [index, message] of pending.entries()) {
+    if (options.deadline !== undefined && Date.now() > options.deadline) {
+      result.deferred = pending.length - index;
+      break;
+    }
     try {
       await processOne(userId, message, ai, now, result);
     } catch (error) {

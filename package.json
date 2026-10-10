@@ -15,7 +15,8 @@
     "db:studio": "prisma studio",
     "db:seed": "tsx scripts/seed.ts",
     "worker": "tsx scripts/worker.ts",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "test:integration": "vitest run tests/integration"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.132.1",

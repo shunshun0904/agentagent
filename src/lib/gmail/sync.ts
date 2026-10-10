@@ -15,6 +15,8 @@ export type SyncResult = {
   skipped: number;
   newAgents: number;
   senderChecks: number;
+  /** 時間切れで取り込まずに残した件数(次回の同期で取り込む) */
+  remaining: number;
   errors: string[];
 };
 
@@ -22,6 +24,8 @@ export type SyncDeps = {
   ai?: AiService;
   gmail?: GmailContext;
   now?: () => Date;
+  /** この時刻(epoch ミリ秒)を過ぎたら新しいメールの取り込みを始めない */
+  deadline?: number;
 };
 
 type IngestOutcome = "ingested" | "skipped";
@@ -278,12 +282,10 @@ async function ingestParsedMessage(state: SyncState, parsed: ParsedGmailMessage)
     } else {
       // 相手から新しいメールが来たので、古いメールへの未送信返信案は取り消す
       const cancelled = await cancelPendingReplies(threadId, message.id, "新しいメールを受信したため取り消しました");
-      if (existingThread.contactId === null || parsed.from.email !== undefined) {
-        await prisma.contact.updateMany({
-          where: { userId, email: parsed.from.email },
-          data: { lastContactAt: parsed.sentAt, name: parsed.from.name ?? undefined },
-        });
-      }
+      await prisma.contact.updateMany({
+        where: { userId, email: parsed.from.email },
+        data: { lastContactAt: parsed.sentAt, name: parsed.from.name ?? undefined },
+      });
       await prisma.thread.update({
         where: { id: threadId },
         data: {
@@ -315,7 +317,16 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
   const account = await prisma.googleAccount.findUnique({ where: { userId } });
   const startedAt = now();
 
-  const result: SyncResult = { listed: 0, fetched: 0, ingested: 0, skipped: 0, newAgents: 0, senderChecks: 0, errors: [] };
+  const result: SyncResult = {
+    listed: 0,
+    fetched: 0,
+    ingested: 0,
+    skipped: 0,
+    newAgents: 0,
+    senderChecks: 0,
+    remaining: 0,
+    errors: [],
+  };
   const agents = await prisma.agent.findMany({ where: { userId } });
   const domainToAgent = new Map<string, Agent>();
   for (const agent of agents) {
@@ -344,7 +355,11 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
     const knownIds = new Set(known.map((m) => m.gmailMessageId));
     const newIds = ids.filter((id) => !knownIds.has(id)).reverse(); // 古い順に処理
 
-    for (const id of newIds) {
+    for (const [index, id] of newIds.entries()) {
+      if (deps.deadline !== undefined && Date.now() > deps.deadline) {
+        result.remaining = newIds.length - index;
+        break;
+      }
       try {
         const { data } = await ctx.gmail.users.messages.get({ userId: "me", id, format: "full" });
         result.fetched += 1;
@@ -360,7 +375,13 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
     }
 
     if (account) {
-      const nextSyncedAt = state.deferredFrom && state.deferredFrom < startedAt ? state.deferredFrom : startedAt;
+      // 時間切れで残したメールがある場合は同期位置を進めない(次回、同じ範囲を取得し既知の ID を除外して続きから取り込む)
+      const nextSyncedAt =
+        result.remaining > 0
+          ? account.lastSyncedAt
+          : state.deferredFrom && state.deferredFrom < startedAt
+            ? state.deferredFrom
+            : startedAt;
       await prisma.googleAccount.update({
         where: { id: account.id },
         data: { lastSyncedAt: nextSyncedAt, lastSyncError: result.errors.length > 0 ? result.errors[0] : null },
@@ -377,7 +398,7 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
 
   await logActivity(userId, {
     type: "sync.completed",
-    message: `Gmail 同期: ${result.ingested} 件取り込み、${result.skipped} 件除外、新規エージェント ${result.newAgents} 件`,
+    message: `Gmail 同期: ${result.ingested} 件取り込み、${result.skipped} 件除外、新規エージェント ${result.newAgents} 件${result.remaining > 0 ? `、時間切れのため ${result.remaining} 件は次回に取り込み` : ""}`,
     metadata: { ...result },
   });
   return result;

@@ -35,6 +35,8 @@ export type DecisionInput = {
   autoRepliesToday: number;
   threadMuted: boolean;
   messageIsAutoSubmitted: boolean;
+  /** 受信から時間が経ちすぎている場合の経過時間(時間)。新しいメールなら null */
+  staleHours: number | null;
 };
 
 export type Decision = {
@@ -68,6 +70,9 @@ export function decideReplyAction(input: DecisionInput): Decision {
   if (agent?.requireApproval) reasons.push("このエージェントは常に承認が必要な設定です");
   if (input.autoRepliesToday >= policy.maxAutoRepliesPerThreadPerDay) {
     reasons.push(`このスレッドの本日の自動返信数が上限(${policy.maxAutoRepliesPerThreadPerDay}件)に達しています`);
+  }
+  if (input.staleHours !== null) {
+    reasons.push(`受信から${Math.floor(input.staleHours)}時間以上経っているため確認が必要です`);
   }
   if (draft.requiresHumanReview) {
     reasons.push(draft.reviewReason ? `AIが確認を求めています: ${draft.reviewReason}` : "AIが人間の確認を求めています");

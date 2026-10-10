@@ -32,6 +32,7 @@ function input(overrides: Partial<DecisionInput> = {}): DecisionInput {
     autoRepliesToday: 0,
     threadMuted: false,
     messageIsAutoSubmitted: false,
+    staleHours: null,
     ...overrides,
   };
 }
@@ -99,6 +100,14 @@ describe("decideReplyAction", () => {
       decideReplyAction(input({ policy: full, category: "RATE_NEGOTIATION", draft: { ...draft, commitments: ["decline"] } })).action,
     ).toBe("auto_send");
     expect(decideReplyAction(input({ policy: full, autoRepliesToday: 2 })).action).toBe("needs_approval");
+  });
+
+  it("受信から時間が経ったメールへの返信は承認待ち(完全自動でも)", () => {
+    const d = decideReplyAction(input({ staleHours: 100 }));
+    expect(d.action).toBe("needs_approval");
+    expect(d.reasons[0]).toContain("100時間");
+    const full = { ...policy, mode: "FULL_AUTO" as const };
+    expect(decideReplyAction(input({ policy: full, staleHours: 80 })).action).toBe("needs_approval");
   });
 
   it("返信案が無い場合は承認待ち", () => {

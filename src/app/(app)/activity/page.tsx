@@ -54,7 +54,8 @@ export default async function ActivityPage({ searchParams }: { searchParams: Pro
   return (
     <>
       <PageHeader title="活動ログ" description="AI の判定、送信、同期、設定変更の記録です。" />
-      {synced && <Notice>同期を実行しました。結果は以下のログを確認してください。</Notice>}
+      {synced === "locked" && <Notice tone="warning">別の同期処理が実行中のため、今回は実行しませんでした。しばらくしてから再度お試しください。</Notice>}
+      {synced && synced !== "locked" && <Notice>同期を実行しました。結果は以下のログを確認してください。</Notice>}
 
       <div className="mb-4 flex flex-wrap gap-1 border-b border-slate-200">
         {TYPE_GROUPS.map((g) => (

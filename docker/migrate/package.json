@@ -1,0 +1,9 @@
+{
+  "name": "agentagent-migrate",
+  "private": true,
+  "description": "コンテナ起動時に prisma migrate deploy を実行するための Prisma CLI(アプリ本体とは別に入れる)",
+  "dependencies": {
+    "dotenv": "18.0.6",
+    "prisma": "7.10.0"
+  }
+}

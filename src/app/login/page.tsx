@@ -1,5 +1,7 @@
 import Link from "next/link";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { canonicalUrlFor } from "@/lib/canonical";
 import { getCurrentUser } from "@/lib/auth/session";
 import { isDevLoginEnabled, isGoogleConfigured } from "@/lib/env";
 
@@ -9,14 +11,17 @@ const ERROR_MESSAGES: Record<string, string> = {
   google_not_configured: "Google OAuth が設定されていません。.env の GOOGLE_CLIENT_ID と GOOGLE_CLIENT_SECRET を設定してください。",
   google_denied: "Google の認可がキャンセルされました。",
   invalid_state: "ログインの検証に失敗しました。もう一度お試しください。",
-  not_allowed: "このアカウントはログインを許可されていません(ALLOWED_GOOGLE_EMAILS を確認してください)。",
+  not_allowed: "このアカウントはログインを許可されていません。サーバーの ALLOWED_GOOGLE_EMAILS に自分のメールアドレスを設定してください(本番環境では未設定だと誰もログインできません)。",
   login_failed: "ログインに失敗しました。サーバーのログを確認してください。",
 };
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
+  const { error } = await searchParams;
+  // ログインは APP_URL のホストで行う(OAuth の Cookie とリダイレクト先をそろえるため)
+  const canonical = canonicalUrlFor((await headers()).get("host"), error ? `/login?error=${encodeURIComponent(error)}` : "/login");
+  if (canonical) redirect(canonical);
   const user = await getCurrentUser();
   if (user) redirect("/");
-  const { error } = await searchParams;
   const googleReady = isGoogleConfigured();
   const devLogin = isDevLoginEnabled();
 

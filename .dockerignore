@@ -1,0 +1,16 @@
+# Docker ビルドに含めないもの
+.git
+node_modules
+.next
+src/generated
+.env
+.env.*
+!.env.example
+*.log
+coverage
+tests
+docs
+.agents
+.claude
+.windsurf
+docker-compose.yml

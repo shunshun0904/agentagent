@@ -8,7 +8,7 @@ import { runTick } from "@/lib/pipeline/tick";
 /** 「今すぐ同期」: 同期 → 分析・返信案作成 → 予定送信 を実行する */
 export async function syncNowAction(): Promise<void> {
   const user = await requireUser();
-  await runTick(user.id);
+  const result = await runTick(user.id);
   revalidatePath("/", "layout");
-  redirect("/activity?synced=1");
+  redirect(result.skipped === "locked" ? "/activity?synced=locked" : "/activity?synced=1");
 }
