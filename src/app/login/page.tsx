@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { LegalLinks } from "@/components/LegalLinks";
 import { canonicalUrlFor } from "@/lib/canonical";
 import { getCurrentUser } from "@/lib/auth/session";
 import { isDevLoginEnabled, isGoogleConfigured } from "@/lib/env";
@@ -26,7 +27,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   const devLogin = isDevLoginEnabled();
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
+    <main className="flex min-h-screen flex-col items-center justify-center bg-slate-100 px-4 py-10">
       <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
         <div className="mb-6">
           <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">
@@ -68,6 +69,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
           ログインすると Gmail の読み取りと送信の権限を要求します。取得したトークンは暗号化して保存され、エージェントとのやり取りにのみ使用します。
         </p>
       </div>
+      <LegalLinks className="mt-6" />
     </main>
   );
 }
