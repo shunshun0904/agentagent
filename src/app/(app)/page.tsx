@@ -2,6 +2,7 @@ import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { requireUser } from "@/lib/auth/session";
 import { isAnthropicConfigured } from "@/lib/env";
+import { isTransientNotice } from "@/lib/errors";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { CategoryBadge, ReplyDecisionBadge, StageBadge, ThreadStatusBadge } from "@/components/badges";
 import { Card, EmptyState, Notice, PageHeader, StatTile } from "@/components/ui";
@@ -9,7 +10,7 @@ import { Card, EmptyState, Notice, PageHeader, StatTile } from "@/components/ui"
 async function loadDashboard(userId: string) {
   const now = new Date();
   const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const [pendingApprovals, scheduled, sentToday, pendingMessages, errorMessages, activeOpportunities, agents, googleAccount, recentThreads, upcomingInterviews, recentLogs, nextScheduled] =
+  const [pendingApprovals, scheduled, sentToday, pendingMessages, errorMessages, activeOpportunities, agents, googleAccount, recentThreads, upcomingInterviews, recentLogs, lastSync, nextScheduled] =
     await Promise.all([
       prisma.reply.count({ where: { userId, status: "PENDING_APPROVAL" } }),
       prisma.reply.count({ where: { userId, status: "SCHEDULED" } }),
@@ -32,6 +33,7 @@ async function loadDashboard(userId: string) {
         include: { agent: { select: { name: true } } },
       }),
       prisma.activityLog.findMany({ where: { userId }, orderBy: { createdAt: "desc" }, take: 8 }),
+      prisma.activityLog.findFirst({ where: { userId, type: "sync.completed" }, orderBy: { createdAt: "desc" } }),
       prisma.reply.findMany({
         where: { userId, status: "SCHEDULED" },
         orderBy: { scheduledFor: "asc" },
@@ -39,13 +41,16 @@ async function loadDashboard(userId: string) {
         include: { thread: { select: { id: true, subject: true, agent: { select: { name: true } } } } },
       }),
     ]);
-  return { pendingApprovals, scheduled, sentToday, pendingMessages, errorMessages, activeOpportunities, agents, googleAccount, recentThreads, upcomingInterviews, recentLogs, nextScheduled };
+  return { pendingApprovals, scheduled, sentToday, pendingMessages, errorMessages, activeOpportunities, agents, googleAccount, recentThreads, upcomingInterviews, recentLogs, lastSync, nextScheduled };
 }
 
 export default async function DashboardPage() {
   const user = await requireUser();
-  const { pendingApprovals, scheduled, sentToday, pendingMessages, errorMessages, activeOpportunities, agents, googleAccount, recentThreads, upcomingInterviews, recentLogs, nextScheduled } =
+  const { pendingApprovals, scheduled, sentToday, pendingMessages, errorMessages, activeOpportunities, agents, googleAccount, recentThreads, upcomingInterviews, recentLogs, lastSync, nextScheduled } =
     await loadDashboard(user.id);
+  // 直近の同期で次回に回した件数(取り込みの途中なら表示する)
+  const syncMeta = (lastSync?.metadata ?? null) as { remaining?: number; deferred?: number } | null;
+  const syncRemaining = (syncMeta?.remaining ?? 0) + (syncMeta?.deferred ?? 0);
 
   return (
     <>
@@ -59,9 +64,19 @@ export default async function DashboardPage() {
       {!isAnthropicConfigured() && (
         <Notice tone="warning">ANTHROPIC_API_KEY が設定されていないため、AI による分析と返信案の生成は動作しません。</Notice>
       )}
-      {googleAccount?.lastSyncError && (
-        <Notice tone="error">
-          <span className="break-words">自動処理でエラーが起きています: {googleAccount.lastSyncError}</span>
+      {googleAccount?.lastSyncError &&
+        (isTransientNotice(googleAccount.lastSyncError) ? (
+          <Notice tone="warning">
+            <span className="break-words">{googleAccount.lastSyncError}</span>
+          </Notice>
+        ) : (
+          <Notice tone="error">
+            <span className="break-words">自動処理でエラーが起きています: {googleAccount.lastSyncError}</span>
+          </Notice>
+        ))}
+      {syncRemaining > 0 && (
+        <Notice tone="info">
+          メールを取り込んでいます: 残り {syncRemaining.toLocaleString("ja-JP")} 件(5 分ごとに続きを取り込みます)
         </Notice>
       )}
 

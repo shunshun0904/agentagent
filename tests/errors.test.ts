@@ -15,6 +15,8 @@ describe("isTransientError", () => {
     expect(isTransientError(quota)).toBe(true);
     expect(isTransientError(errorWith({ response: { status: 403 } }, "User Rate Limit Exceeded"))).toBe(true);
     expect(isTransientError(errorWith({ code: "429" }))).toBe(true);
+    expect(describeError(quota)).toContain("Gmail API の 1 分あたりの利用上限");
+    expect(describeError(quota).startsWith("一時的な")).toBe(true);
   });
 
   it("サーバー側の失敗、通信の失敗、DB の接続エラーは一時的なエラー", () => {

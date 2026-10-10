@@ -7,7 +7,7 @@ import { defaultAiService, type AiService } from "@/lib/ai/service";
 import { describeError, errorMessage, shouldRetryLater } from "@/lib/errors";
 import { getGmailForUser, type GmailContext } from "@/lib/gmail/client";
 import { parseGmailMessage, type ParsedGmailMessage } from "@/lib/gmail/parse";
-import { createGmailCaller, type GmailCaller } from "@/lib/gmail/throttle";
+import { createGmailCaller, GMAIL_UNITS, gmailUnitsBudget, type GmailCaller } from "@/lib/gmail/throttle";
 import { extractDomain, isFreeMailDomain, looksLikeNoReply, truncate } from "@/lib/text";
 
 export type SyncResult = {
@@ -32,6 +32,8 @@ export type SyncDeps = {
   deadline?: number;
   /** Gmail API の呼び出し間隔の最小値(ミリ秒)。テストでは 0 にする */
   gmailMinIntervalMs?: number;
+  /** Gmail API を 1 分あたりに使ってよい単位。省略時は GMAIL_QUOTA_UNITS_PER_MINUTE から求める。テストでは無制限にする */
+  gmailUnitsPerMinute?: number;
   /** 待機処理(テストで差し替える) */
   sleep?: (ms: number) => Promise<void>;
 };
@@ -78,6 +80,7 @@ async function listMessageIds(gmail: gmail_v1.Gmail, call: GmailCaller, query: s
         maxResults: Math.min(100, max - ids.length),
         pageToken,
       }),
+      GMAIL_UNITS.list,
     );
     for (const m of data.messages ?? []) {
       if (m.id) ids.push(m.id);
@@ -347,7 +350,12 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
     remaining: 0,
     errors: [],
   };
-  const call = createGmailCaller({ minIntervalMs: deps.gmailMinIntervalMs, sleep: deps.sleep, deadline: deps.deadline });
+  const call = createGmailCaller({
+    unitsPerMinute: deps.gmailUnitsPerMinute ?? gmailUnitsBudget(env.GMAIL_QUOTA_UNITS_PER_MINUTE),
+    minIntervalMs: deps.gmailMinIntervalMs,
+    sleep: deps.sleep,
+    deadline: deps.deadline,
+  });
   const agents = await prisma.agent.findMany({ where: { userId } });
   const domainToAgent = new Map<string, Agent>();
   for (const agent of agents) {
@@ -395,7 +403,7 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
         break;
       }
       try {
-        const { data } = await call(() => ctx.gmail.users.messages.get({ userId: "me", id, format: "full" }));
+        const { data } = await call(() => ctx.gmail.users.messages.get({ userId: "me", id, format: "full" }), GMAIL_UNITS.get);
         result.fetched += 1;
         const parsed = parseGmailMessage(data);
         const outcome = await ingestParsedMessage(state, parsed);

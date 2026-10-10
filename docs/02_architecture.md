@@ -128,7 +128,7 @@ sequenceDiagram
 - クエリは既定で `-in:spam -in:trash -in:chats`。取り込み範囲(`GMAIL_SYNC_LOOKBACK_DAYS`、既定 30 日)の取り込みを済ませるまでは `newer_than:{GMAIL_SYNC_LOOKBACK_DAYS}d` で範囲全体を一覧し、済んだら(`GoogleAccount.syncedLookbackDays` に記録)前回同期時刻の1時間前から(`after:`)だけを取得する。範囲を広げると、次回の同期で範囲全体を取り込み直す。
 - 取り込み済みのメール(`Message`)と、除外したメール(`SkippedMessage`)は ID で除外し、取得し直さない。`SkippedMessage` は取り込み範囲 + 7 日を過ぎたら消す。
 - 送信者の判定順序: 既知のスレッド → 既知エージェントのドメイン → 送信者判定キャッシュ(`SenderVerdict`) → 自動送信のメールと no-reply のアドレスは除外 → AI による判定。一斉配信(List-Unsubscribe など)は除外せず AI で判定する(エージェントの担当者が配信システムで案件紹介を送るため)。AI 判定は1回の同期で `SENDER_CHECKS_PER_SYNC` 件まで。上限を超えた分は次回の同期で再判定されるよう、同期開始位置を戻す。
-- Gmail API の利用上限(1ユーザーあたり毎分 6,000 単位)を超えないよう、呼び出しの間隔を 100 ミリ秒以上あける。利用上限や一時的な失敗は待ってからやり直し(最大 3 回)、それでも失敗したら、そのメールから先は次回の同期に回す(同期位置を進めない)。メール固有の失敗は、同期が止まらないようにそのメールだけ飛ばす。
+- Gmail API の利用上限(1ユーザーあたり毎分 `GMAIL_QUOTA_UNITS_PER_MINUTE` 単位、既定 6,000)を超えないよう、呼び出しごとの単位(`messages.list` 5、`messages.get` 20)を直近 1 分間で数え、上限の 75% に達したら枠が空くまで待つ(`src/lib/gmail/throttle.ts`)。待つと同期の締め切りを過ぎる場合は、そのメールから先を次回に回す。利用上限や一時的な失敗は待ってからやり直し(最大 3 回)、それでも失敗したら、そのメールから先は次回の同期に回す(同期位置を進めない)。メール固有の失敗は、同期が止まらないようにそのメールだけ飛ばす。
 - AI がエージェントと判定した送信者は、エージェントと担当者を自動登録する。
 - 本人が Gmail から手動で送ったメールも取り込み、そのスレッドの未送信の返信案を取り消す(二重返信の防止)。
 - 相手から新しいメールが届いたスレッドでは、古いメールへの未送信返信案を取り消し、新しいメールに対して返信案を作り直す。
@@ -269,6 +269,7 @@ erDiagram
 | REPLY_DRAFT_MAX_AGE_DAYS | 任意 | この日数以上経ったメールには返信案を作らない(既定 7 日) |
 | DEV_LOGIN_ENABLED | 任意 | 開発用ログインの有効化(本番では常に無効) |
 | GMAIL_SYNC_QUERY / GMAIL_SYNC_LOOKBACK_DAYS / GMAIL_SYNC_MAX_MESSAGES / SENDER_CHECKS_PER_SYNC | 任意 | 同期の調整(取り込み範囲は既定 30 日、一覧の上限は既定 5,000 件) |
+| GMAIL_QUOTA_UNITS_PER_MINUTE | 任意 | Gmail API の 1 ユーザーあたり 1 分あたりの利用上限(既定 6,000。2026 年 5 月より前に作ったプロジェクトは 15,000) |
 | SYNC_INTERVAL_SECONDS | 任意 | ワーカーの実行間隔(既定 300) |
 | RUN_MIGRATIONS_ON_START | 任意 | `false` でコンテナ起動時のマイグレーションを止める(既定 `true`) |
 

@@ -26,6 +26,8 @@ export type TickDeps = {
   budgetSeconds?: number;
   /** Gmail API の呼び出し間隔の最小値(ミリ秒)。テストでは 0 にする */
   gmailMinIntervalMs?: number;
+  /** Gmail API を 1 分あたりに使ってよい単位。テストでは無制限にする */
+  gmailUnitsPerMinute?: number;
   /** 待機処理(テストで差し替える) */
   sleep?: (ms: number) => Promise<void>;
 };

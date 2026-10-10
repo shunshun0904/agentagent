@@ -238,7 +238,13 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
   let encryptSecret: typeof import("@/lib/crypto").encryptSecret;
   let ensureUserDefaults: typeof import("@/lib/policy/defaults").ensureUserDefaults;
 
-  const deps = () => ({ ai: ai.service as never, gmail: fakeGmail(box), gmailMinIntervalMs: 0, sleep: async () => {} });
+  const deps = () => ({
+    ai: ai.service as never,
+    gmail: fakeGmail(box),
+    gmailMinIntervalMs: 0,
+    gmailUnitsPerMinute: Number.POSITIVE_INFINITY,
+    sleep: async () => {},
+  });
 
   beforeAll(async () => {
     ({ prisma } = await import("@/lib/db"));

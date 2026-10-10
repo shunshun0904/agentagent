@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import type { User } from "@/generated/prisma/client";
 import { syncNowAction } from "@/actions/sync";
+import { isTransientNotice } from "@/lib/errors";
 import { MobileNav } from "@/components/nav/MobileNav";
 import { NavLinks } from "@/components/nav/NavLinks";
 import { SubmitButton } from "@/components/ui/SubmitButton";
@@ -37,8 +38,12 @@ export async function Sidebar({ user }: { user: User }) {
               Gmail: {googleAccount.email}
             </div>
             {googleAccount.lastSyncError ? (
-              <div className="mt-1 line-clamp-4 break-words text-rose-600" title={googleAccount.lastSyncError}>
-                同期エラー: {googleAccount.lastSyncError}
+              <div
+                className={`mt-1 line-clamp-4 break-words ${isTransientNotice(googleAccount.lastSyncError) ? "text-amber-700" : "text-rose-600"}`}
+                title={googleAccount.lastSyncError}
+              >
+                {isTransientNotice(googleAccount.lastSyncError) ? "同期: " : "同期エラー: "}
+                {googleAccount.lastSyncError}
               </div>
             ) : null}
           </>

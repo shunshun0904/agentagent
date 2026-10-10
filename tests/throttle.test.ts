@@ -1,30 +1,76 @@
 import { describe, expect, it } from "vitest";
-import { createGmailCaller } from "@/lib/gmail/throttle";
+import { GMAIL_UNITS, createGmailCaller, gmailUnitsBudget } from "@/lib/gmail/throttle";
 
 function rateLimitError(): Error {
-  return Object.assign(new Error("Quota exceeded for quota metric 'Queries'"), { code: 429 });
+  return Object.assign(new Error("Quota exceeded for quota metric 'Total Query Cost'"), { code: 429 });
 }
 
-function recorder() {
+/** 待機すると時刻が進む偽の時計 */
+function fakeClock(start = 1_000_000) {
+  let t = start;
   const waits: number[] = [];
-  return { waits, sleep: async (ms: number) => void waits.push(ms) };
+  return {
+    waits,
+    now: () => t,
+    sleep: async (ms: number) => {
+      waits.push(ms);
+      t += ms;
+    },
+    advance: (ms: number) => {
+      t += ms;
+    },
+  };
 }
+
+describe("gmailUnitsBudget", () => {
+  it("上限の 75% を使う", () => {
+    expect(gmailUnitsBudget(6000)).toBe(4500);
+    expect(gmailUnitsBudget(15000)).toBe(11250);
+  });
+});
 
 describe("createGmailCaller", () => {
   it("呼び出しの間隔をあける", async () => {
-    const { waits, sleep } = recorder();
-    const call = createGmailCaller({ minIntervalMs: 100, sleep });
+    const clock = fakeClock();
+    const call = createGmailCaller({ minIntervalMs: 100, sleep: clock.sleep, now: clock.now });
     for (let i = 0; i < 3; i += 1) await call(async () => i);
-    expect(waits).toHaveLength(2);
-    for (const w of waits) {
-      expect(w).toBeGreaterThan(50);
-      expect(w).toBeLessThanOrEqual(100);
+    expect(clock.waits).toEqual([100, 100]);
+  });
+
+  it("1 分あたりの単位が上限に達したら、枠が空くまで待つ", async () => {
+    const clock = fakeClock();
+    // 上限 100 単位: get(20 単位)は 5 回まで。6 回目は最初の呼び出しから 1 分たつまで待つ
+    const call = createGmailCaller({ unitsPerMinute: 100, minIntervalMs: 0, sleep: clock.sleep, now: clock.now });
+    for (let i = 0; i < 5; i += 1) {
+      await call(async () => i, GMAIL_UNITS.get);
+      clock.advance(1_000);
     }
+    expect(clock.waits).toEqual([]);
+    await call(async () => "ok", GMAIL_UNITS.get);
+    expect(clock.waits).toEqual([55_000]); // 最初の呼び出し(5 秒前)から 60 秒後
+    // 枠が空いた分だけ続けて呼べる(2 回目の呼び出しは 1 秒後に空く)
+    await call(async () => "ok", GMAIL_UNITS.get);
+    expect(clock.waits).toEqual([55_000, 1_000]);
+  });
+
+  it("単位の少ない一覧取得は、同じ上限でも多く呼べる", async () => {
+    const clock = fakeClock();
+    const call = createGmailCaller({ unitsPerMinute: 100, minIntervalMs: 0, sleep: clock.sleep, now: clock.now });
+    for (let i = 0; i < 20; i += 1) await call(async () => i, GMAIL_UNITS.list);
+    expect(clock.waits).toEqual([]);
+  });
+
+  it("枠が空くまで待つと期限を過ぎる場合は、待たずにエラーにする", async () => {
+    const clock = fakeClock();
+    const call = createGmailCaller({ unitsPerMinute: 20, minIntervalMs: 0, sleep: clock.sleep, now: clock.now, deadline: clock.now() + 10_000 });
+    await call(async () => "first", GMAIL_UNITS.get);
+    await expect(call(async () => "second", GMAIL_UNITS.get)).rejects.toMatchObject({ code: 429 });
+    expect(clock.waits).toEqual([]);
   });
 
   it("利用上限のエラーは待ってからやり直す", async () => {
-    const { waits, sleep } = recorder();
-    const call = createGmailCaller({ minIntervalMs: 0, sleep });
+    const clock = fakeClock();
+    const call = createGmailCaller({ minIntervalMs: 0, sleep: clock.sleep, now: clock.now });
     let attempts = 0;
     const value = await call(async () => {
       attempts += 1;
@@ -33,12 +79,12 @@ describe("createGmailCaller", () => {
     });
     expect(value).toBe("ok");
     expect(attempts).toBe(3);
-    expect(waits).toEqual([2_000, 5_000]);
+    expect(clock.waits).toEqual([5_000, 15_000]);
   });
 
   it("やり直しの回数を超えたらエラーにする", async () => {
-    const { sleep } = recorder();
-    const call = createGmailCaller({ minIntervalMs: 0, sleep });
+    const clock = fakeClock();
+    const call = createGmailCaller({ minIntervalMs: 0, sleep: clock.sleep, now: clock.now });
     let attempts = 0;
     await expect(
       call(async () => {
@@ -50,8 +96,8 @@ describe("createGmailCaller", () => {
   });
 
   it("一時的でないエラーはやり直さない", async () => {
-    const { waits, sleep } = recorder();
-    const call = createGmailCaller({ minIntervalMs: 0, sleep });
+    const clock = fakeClock();
+    const call = createGmailCaller({ minIntervalMs: 0, sleep: clock.sleep, now: clock.now });
     let attempts = 0;
     await expect(
       call(async () => {
@@ -60,17 +106,17 @@ describe("createGmailCaller", () => {
       }),
     ).rejects.toThrow("not found");
     expect(attempts).toBe(1);
-    expect(waits).toEqual([]);
+    expect(clock.waits).toEqual([]);
   });
 
-  it("期限を過ぎてまでは待たない", async () => {
-    const { waits, sleep } = recorder();
-    const call = createGmailCaller({ minIntervalMs: 0, sleep, deadline: Date.now() + 1_000 });
+  it("やり直しの待ち時間が期限を過ぎる場合は待たない", async () => {
+    const clock = fakeClock();
+    const call = createGmailCaller({ minIntervalMs: 0, sleep: clock.sleep, now: clock.now, deadline: clock.now() + 1_000 });
     await expect(
       call(async () => {
         throw rateLimitError();
       }),
     ).rejects.toThrow("Quota exceeded");
-    expect(waits).toEqual([]);
+    expect(clock.waits).toEqual([]);
   });
 });

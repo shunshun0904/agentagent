@@ -107,8 +107,16 @@ export function describeError(error: unknown): string {
   if (/insufficient (authentication )?(scopes|permission)/i.test(message)) {
     return "Gmail へのアクセスが許可されていません。ログアウトしてからログインし直し、Gmail の項目にチェックを入れてください";
   }
+  if (/gmail/i.test(message) && /quota|rate ?limit|利用上限/i.test(message)) {
+    return "一時的な制限のため、残りは次回の処理で続きから取り込みます(Gmail API の 1 分あたりの利用上限に達しました)";
+  }
   if (isTransientError(error)) {
     return `一時的なエラーのため、次回の処理でやり直します(${message.slice(0, 120)})`;
   }
   return message;
+}
+
+/** 画面で「エラー」ではなく「一時的な状態」として表示してよい説明文か */
+export function isTransientNotice(message: string): boolean {
+  return message.startsWith("一時的な");
 }
