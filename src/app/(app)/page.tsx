@@ -59,6 +59,11 @@ export default async function DashboardPage() {
       {!isAnthropicConfigured() && (
         <Notice tone="warning">ANTHROPIC_API_KEY が設定されていないため、AI による分析と返信案の生成は動作しません。</Notice>
       )}
+      {googleAccount?.lastSyncError && (
+        <Notice tone="error">
+          <span className="break-words">自動処理でエラーが起きています: {googleAccount.lastSyncError}</span>
+        </Notice>
+      )}
 
       <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         <StatTile label="承認待ち" value={pendingApprovals} href="/approvals" tone={pendingApprovals > 0 ? "warning" : "default"} />

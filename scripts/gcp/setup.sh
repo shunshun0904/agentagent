@@ -81,7 +81,9 @@ prepare_value() {
       normalize_db_url "${env_name}" "${value}"
       ;;
     ANTHROPIC_API_KEY)
+      value="$(normalize_anthropic_key "${value}")"
       [[ "${value}" == sk-ant-* ]] || warn "ANTHROPIC_API_KEY が sk-ant- で始まっていません。値を確認してください"
+      check_anthropic_key "${value}" || return 1
       printf '%s' "${value}"
       ;;
     *)
@@ -171,6 +173,28 @@ verify_db_secret() {
   done
 }
 
+# 登録済みの Anthropic API キーが使えるか確認する。使えなければ、対話中なら入力し直してもらう
+verify_anthropic_secret() {
+  local secret_id stored value attempt
+  secret_id="$(secret_id_for ANTHROPIC_API_KEY)"
+  stored="$(read_secret "${secret_id}")" || die "${secret_id} を読み取れません"
+  value="$(normalize_anthropic_key "${stored}")"
+  for attempt in 1 2 3 4; do
+    if check_anthropic_key "${value}"; then
+      if [[ "${value}" != "${stored}" ]]; then
+        write_secret "${secret_id}" "${value}"
+        ok "  - ${secret_id}: キーを保存し直しました"
+      fi
+      return 0
+    fi
+    if ! is_interactive || [[ ${attempt} -ge 4 ]]; then
+      die "ANTHROPIC_API_KEY が使えません。正しいキーを用意して、もう一度 bash scripts/gcp/setup.sh を実行してください"
+    fi
+    value="$(normalize_anthropic_key "$(prompt_value "Anthropic API キーを入力し直してください")")"
+    [[ -n "${value}" ]] || die "値が空です"
+  done
+}
+
 ensure_secret DATABASE_URL prompt "Supabase の Transaction pooler の接続文字列(ポート 6543、パスワード入り)"
 ensure_secret DIRECT_URL prompt "Supabase の Session pooler の接続文字列(ポート 5432、パスワード入り)"
 ensure_secret GOOGLE_CLIENT_SECRET prompt "Google OAuth クライアントシークレット"
@@ -184,6 +208,8 @@ fi
 info "  データベースへの接続を確認しています"
 verify_db_secret DIRECT_URL "Supabase の Session pooler の接続文字列(ポート 5432、パスワード入り)"
 verify_db_secret DATABASE_URL "Supabase の Transaction pooler の接続文字列(ポート 6543、パスワード入り)"
+info "  Anthropic API キーを確認しています"
+verify_anthropic_secret
 
 # ---------------------------------------------------------------------------
 info "[4/6] Cloud Run にデプロイしています(ビルドを含め 5〜10 分程度かかります)"

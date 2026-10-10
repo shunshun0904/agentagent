@@ -130,7 +130,7 @@ bash scripts/gcp/setup.sh
 
 1. 必要な API(Cloud Run、Cloud Build、Artifact Registry、Secret Manager、Cloud Scheduler、IAM、Gmail)の有効化
 2. 実行用サービスアカウント `agentagent-run` の作成と、シークレットの読み取り権限の付与
-3. シークレットの登録と、DB 接続文字列での接続確認(失敗したら理由を表示し、その場で入力し直せる)
+3. シークレットの登録と、DB 接続文字列での接続確認、Anthropic API キーが使えるかの確認(失敗したら理由を表示し、その場で入力し直せる)
 4. Cloud Run へのデプロイ(東京リージョン、未認証アクセス許可、メモリ 1 GiB、タイムアウト 15 分、インスタンス 0〜2)。失敗した場合は Cloud Run のログを表示する
 5. Cloud Scheduler のジョブ `agentagent-tick` の登録(5 分ごと、東京時間)
 6. Artifact Registry の古いイメージの自動削除設定
@@ -208,7 +208,8 @@ GitHub に push するたびに自動でデプロイしたい場合は、Cloud R
 | デプロイ後にヘルスチェックが失敗する | DB 接続文字列の誤りが多い。Cloud Run のログで `[entrypoint]` の行を確認し、`set-secret.sh` で `DATABASE_URL` と `DIRECT_URL` を直す |
 | ログに `self-signed certificate` や `unable to verify` | `DATABASE_SSL` が設定されていない、または接続文字列の sslmode と矛盾している。setup.sh を再実行する |
 | 定期実行が 401 で失敗する | `CRON_SECRET` を変更した後に Cloud Scheduler を更新していない。setup.sh を再実行する |
-| 同期でエラーが出る | 設定画面の Gmail 連携欄にエラー内容が表示される。Gmail API が無効、またはトークン切れの場合は再ログインする |
+| 同期でエラーが出る | サイドバー(スマートフォンではメニュー)、ダッシュボード、設定画面にエラー内容が表示される。Gmail API が無効、またはトークン切れの場合は再ログインする |
+| 「Anthropic API キーが無効です」 | 登録した API キーが間違っているか、無効になっている。Claude Console(https://platform.claude.com)の Settings → API keys でキーを作成し、Cloud Shell で `git pull` の後 `bash scripts/gcp/set-secret.sh ANTHROPIC_API_KEY` を実行して貼り付ける(キーが使えるか確認してから保存する)。止まっていたメールは次の定期処理で処理される |
 | 7 日ごとにログインが切れる | OAuth 同意画面の公開ステータスが「テスト」のまま。手順 7.1 で「本番環境」にする |
 | 「アプリを公開」が押せない(「[ブランディング] ページで構成を完了する必要があります」と表示される) | ブランディングのホームページ、プライバシーポリシー、利用規約、承認済みドメインが未入力。手順 7.1 の値を入力して保存する |
 | ログイン時に「アクセスをブロック」「エラー 403: access_denied」 | 公開ステータスが「テスト中」で、ログインしたアカウントがテストユーザーに登録されていない。手順 7.1 で「本番環境」にするか、「対象」の「テストユーザー」に追加する |

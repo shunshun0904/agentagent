@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { getEnv } from "@/lib/env";
 import { logActivity } from "@/lib/activity";
 import { AiError, PROMPT_VERSION } from "@/lib/ai/client";
+import { describeError, shouldRetryLater } from "@/lib/errors";
 import { defaultAiService, type AiService } from "@/lib/ai/service";
 import type { AnalysisPromptInput, PromptMessage } from "@/lib/ai/prompts";
 import type { Analysis } from "@/lib/ai/schemas";
@@ -18,8 +19,10 @@ export type ProcessResult = {
   needsApproval: number;
   noReply: number;
   errors: number;
-  /** 時間切れで次回に回した件数 */
+  /** 時間切れや、API キーの問題・一時的な障害で次回に回した件数 */
   deferred: number;
+  /** API キーの問題や一時的な障害で処理を止めた場合、その説明 */
+  haltedBy: string | null;
 };
 
 export type ProcessOptions = {
@@ -345,7 +348,7 @@ export async function processPendingMessages(userId: string, options: ProcessOpt
   const ai = options.ai ?? defaultAiService;
   const now = options.now ?? (() => new Date());
   const limit = options.limit ?? 20;
-  const result: ProcessResult = { processed: 0, autoScheduled: 0, needsApproval: 0, noReply: 0, errors: 0, deferred: 0 };
+  const result: ProcessResult = { processed: 0, autoScheduled: 0, needsApproval: 0, noReply: 0, errors: 0, deferred: 0, haltedBy: null };
 
   const pending = await prisma.message.findMany({
     where: { processingStatus: "PENDING", direction: "INBOUND", thread: { userId } },
@@ -366,6 +369,13 @@ export async function processPendingMessages(userId: string, options: ProcessOpt
     try {
       await processOne(userId, message, ai, now, result);
     } catch (error) {
+      if (shouldRetryLater(error)) {
+        // API キーの誤りや利用上限、一時的な障害。どのメールでも失敗するため、未処理のまま残して次回やり直す
+        console.error(`[process] メッセージ ${message.id} の処理を中断し、次回に回します`, error);
+        result.deferred = pending.length - index;
+        result.haltedBy = describeError(error);
+        break;
+      }
       result.errors += 1;
       const detail = error instanceof Error ? error.message : String(error);
       const code = error instanceof AiError ? error.code : "unknown";

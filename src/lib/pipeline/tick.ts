@@ -73,6 +73,11 @@ export async function runTick(userId: string, deps: TickDeps = {}): Promise<Tick
 
     try {
       result.process = await processPendingMessages(userId, { ai: deps.ai, now: deps.now, deadline: started + budgetMs });
+      if (result.process.haltedBy) {
+        // API キーの誤りなどで処理が止まっていることを画面(同期エラーの欄)に出す
+        result.errors.push(`process: ${result.process.haltedBy}`);
+        await prisma.googleAccount.updateMany({ where: { userId }, data: { lastSyncError: result.process.haltedBy } });
+      }
     } catch (error) {
       result.errors.push(`process: ${describe(error)}`);
     }

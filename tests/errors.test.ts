@@ -1,5 +1,6 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
-import { isConfigurationError, isTransientError, shouldRetryLater } from "@/lib/errors";
+import { describeError, isConfigurationError, isTransientError, shouldRetryLater } from "@/lib/errors";
 
 function errorWith(fields: Record<string, unknown>, message = "error"): Error {
   return Object.assign(new Error(message), fields);
@@ -55,5 +56,42 @@ describe("shouldRetryLater", () => {
     expect(shouldRetryLater(errorWith({ code: 401 }))).toBe(true);
     expect(shouldRetryLater(errorWith({ code: 404 }))).toBe(false);
     expect(shouldRetryLater(Object.assign(new Error("refusal"), { name: "AiError", code: "refusal" }))).toBe(false);
+  });
+});
+
+describe("Anthropic API のエラー", () => {
+  // SDK が API の応答から作るのと同じ方法でエラーを作る
+  const apiError = (status: number, type: string, message: string) =>
+    Anthropic.APIError.generate(status, { type: "error", error: { type, message } }, undefined, new Headers());
+
+  it("API キーが無効(401)なら、次回やり直し、設定方法を案内する", () => {
+    const error = apiError(401, "authentication_error", "invalid x-api-key");
+    expect(error).toBeInstanceOf(Anthropic.AuthenticationError);
+    expect(isConfigurationError(error)).toBe(true);
+    expect(shouldRetryLater(error)).toBe(true);
+    expect(describeError(error)).toContain("Anthropic API キーが無効です");
+    expect(describeError(error)).toContain("set-secret.sh ANTHROPIC_API_KEY");
+  });
+
+  it("混雑(529)や接続の失敗は一時的なエラー", () => {
+    expect(isTransientError(apiError(529, "overloaded_error", "Overloaded"))).toBe(true);
+    expect(isTransientError(new Anthropic.APIConnectionError({ message: "Connection error." }))).toBe(true);
+    expect(describeError(apiError(529, "overloaded_error", "Overloaded"))).toContain("次回の処理でやり直します");
+  });
+
+  it("支払いの問題は案内する", () => {
+    expect(describeError(apiError(402, "billing_error", "billing problem"))).toContain("支払い設定");
+  });
+
+  it("リクエストの誤り(400)はそのメールだけの失敗として扱う", () => {
+    const error = apiError(400, "invalid_request_error", "bad request");
+    expect(shouldRetryLater(error)).toBe(false);
+  });
+});
+
+describe("describeError(Google)", () => {
+  it("ログイン切れと権限不足は、やり直し方を案内する", () => {
+    expect(describeError(new Error("invalid_grant"))).toContain("もう一度 Google でログイン");
+    expect(describeError(errorWith({ code: 403 }, "Request had insufficient authentication scopes."))).toContain("Gmail の項目にチェック");
   });
 });

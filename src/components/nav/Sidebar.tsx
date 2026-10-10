@@ -37,7 +37,9 @@ export async function Sidebar({ user }: { user: User }) {
               Gmail: {googleAccount.email}
             </div>
             {googleAccount.lastSyncError ? (
-              <div className="mt-1 break-words text-rose-600">同期エラー: {googleAccount.lastSyncError.slice(0, 60)}</div>
+              <div className="mt-1 line-clamp-4 break-words text-rose-600" title={googleAccount.lastSyncError}>
+                同期エラー: {googleAccount.lastSyncError}
+              </div>
             ) : null}
           </>
         ) : (

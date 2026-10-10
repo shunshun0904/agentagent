@@ -23,6 +23,10 @@ if [[ "${name}" == "DATABASE_URL" || "${name}" == "DIRECT_URL" ]]; then
   value="$(normalize_db_url "${name}" "${value}")" || die "${name} の形式が正しくありません"
   check_db_connection "${name}" "${value}" || die "${name} でデータベースに接続できないため、保存しませんでした"
 fi
+if [[ "${name}" == "ANTHROPIC_API_KEY" ]]; then
+  value="$(normalize_anthropic_key "${value}")"
+  check_anthropic_key "${value}" || die "このキーは使えないため、保存しませんでした。正しいキーで、もう一度実行してください"
+fi
 write_secret "${secret_id}" "${value}"
 ok "${secret_id} を更新しました"
 

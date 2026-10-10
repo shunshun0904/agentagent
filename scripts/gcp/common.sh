@@ -148,6 +148,54 @@ explain_db_error() {
   esac
 }
 
+# Anthropic API キーから、貼り付けで混ざりやすい前後の空白と引用符を取り除く
+normalize_anthropic_key() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  printf '%s' "${value}"
+}
+
+# Anthropic API キーが使えるかを、モデル一覧の取得で確かめる(トークンは消費しない)。
+# 使えないと分かった場合だけ 1 を返す。通信できないなど確かめられない場合は 0(確認を省略)。
+# 結果は標準エラーに出す(呼び出し元が標準出力を値として受け取ることがあるため)
+check_anthropic_key() {
+  local key="$1" status
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "curl が見つからないため、ANTHROPIC_API_KEY の確認を省略します"
+    return 0
+  fi
+  # キーがプロセス一覧に出ないよう、ヘッダーは標準入力から渡す
+  status="$(printf 'x-api-key: %s\nanthropic-version: 2023-06-01\n' "${key}" |
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -H @- https://api.anthropic.com/v1/models 2>/dev/null)" || status="000"
+  case "${status}" in
+    200)
+      ok "  - ANTHROPIC_API_KEY: 使えるキーです" >&2
+      return 0
+      ;;
+    401)
+      warn "ANTHROPIC_API_KEY が無効です(401)。Claude Console(https://platform.claude.com)の Settings → API keys で作成したキー(sk-ant- で始まる)を入力してください。キーは作成時に一度しか表示されないため、分からない場合は新しく作成します"
+      return 1
+      ;;
+    403)
+      warn "ANTHROPIC_API_KEY に API を使う権限がありません(403)。Claude Console で組織とワークスペースの設定を確認してください"
+      return 1
+      ;;
+    000)
+      warn "Anthropic API に接続できなかったため、ANTHROPIC_API_KEY の確認を省略します"
+      return 0
+      ;;
+    *)
+      warn "ANTHROPIC_API_KEY の確認で想定外の応答がありました(HTTP ${status})。このまま進めます"
+      return 0
+      ;;
+  esac
+}
+
 # 接続文字列で実際に接続できるか確認する(psql が無ければ確認を省略して成功扱い)
 check_db_connection() {
   local name="$1" url="$2" out

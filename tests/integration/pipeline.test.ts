@@ -7,6 +7,7 @@
  * 環境変数が無い場合はスキップされる。
  */
 import { randomUUID } from "node:crypto";
+import Anthropic from "@anthropic-ai/sdk";
 import type { gmail_v1 } from "googleapis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -132,10 +133,24 @@ const usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, c
 /** 件名から結果を決める偽の AI */
 function fakeAi() {
   const calls = { checkSender: 0, analyze: 0, draft: 0 };
+  /** true の間は、API キーが無効なときと同じエラー(401)を返す */
+  const control = { invalidKey: false };
+  const failIfInvalidKey = () => {
+    if (control.invalidKey) {
+      throw Anthropic.APIError.generate(
+        401,
+        { type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } },
+        undefined,
+        new Headers(),
+      );
+    }
+  };
   return {
     calls,
+    control,
     service: {
       async checkSender(input: { fromEmail: string }) {
+        failIfInvalidKey();
         calls.checkSender += 1;
         const isAgent = [AGENT_DOMAIN, OTHER_DOMAIN, THIRD_DOMAIN, FOURTH_DOMAIN].some((d) => input.fromEmail.endsWith(`@${d}`));
         return {
@@ -145,6 +160,7 @@ function fakeAi() {
         };
       },
       async analyzeMessage(input: { message: { subject: string } }) {
+        failIfInvalidKey();
         calls.analyze += 1;
         const subject = input.message.subject;
         const isNewsletter = subject.includes("メルマガ");
@@ -512,5 +528,32 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     expect(ai.calls.checkSender - checksBefore).toBe(1);
     const verdict = await prisma.senderVerdict.findUniqueOrThrow({ where: { userId_email: { userId, email } } });
     expect(verdict.kind).toBe("AGENT");
+  });
+
+  it("Anthropic API キーが無効なときは、メールを未処理のまま残し、キーを直した後に処理する", async () => {
+    ai.control.invalidKey = true;
+    // 既知のエージェントのメールは、送信者の判定なしで取り込まれ、分析で失敗する
+    box.messages.push(mail({ id: "m15", threadId: "t13", from: `佐藤 <sato@${AGENT_DOMAIN}>`, subject: "単価のご相談", body: "ご相談です", minutesAgo: 1 }));
+    const r1 = await runTick(userId, deps());
+    expect(r1.sync?.ingested).toBe(1);
+    expect(r1.process?.haltedBy).toContain("Anthropic API キーが無効です");
+    expect((await prisma.message.findFirstOrThrow({ where: { gmailMessageId: "m15" } })).processingStatus).toBe("PENDING");
+    expect((await prisma.googleAccount.findUniqueOrThrow({ where: { userId } })).lastSyncError).toContain("Anthropic API キーが無効です");
+
+    // 未知の送信者の判定で失敗した場合は、そこで同期を止めて次回に回す
+    box.messages.push(mail({ id: "m16", threadId: "t14", from: "新規 <new@fifth.example.jp>", subject: "ご挨拶", body: "はじめまして", minutesAgo: 0 }));
+    const r2 = await runTick(userId, deps());
+    expect(r2.sync?.remaining).toBe(1);
+    expect(r2.sync?.errors.join()).toContain("Anthropic API キーが無効です");
+    expect(await prisma.skippedMessage.count({ where: { userId, gmailMessageId: "m16" } })).toBe(0);
+
+    // キーを直すと、次の定期処理で続きが進む
+    ai.control.invalidKey = false;
+    const r3 = await runTick(userId, deps());
+    expect(r3.errors).toEqual([]);
+    expect(r3.process?.haltedBy).toBeNull();
+    expect((await prisma.message.findFirstOrThrow({ where: { gmailMessageId: "m15" } })).processingStatus).toBe("PROCESSED");
+    expect(await prisma.skippedMessage.count({ where: { userId, gmailMessageId: "m16" } })).toBe(1);
+    expect((await prisma.googleAccount.findUniqueOrThrow({ where: { userId } })).lastSyncError).toBeNull();
   });
 });

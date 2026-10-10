@@ -147,6 +147,8 @@ sequenceDiagram
 
 締め切り時刻(tick の時間予算)を過ぎたら次のメールの処理を始めず、残りは次回に回す。
 
+API キーの誤り(401)や権限不足、利用上限・混雑・通信の失敗など、どのメールでも失敗するエラー(`src/lib/errors.ts` の `shouldRetryLater`)では、メールを `ERROR` にせず `PENDING` のまま残して処理を止め、次回の定期処理でやり直す。その説明(`describeError`)を `GoogleAccount.lastSyncError` に記録し、サイドバーとダッシュボードに表示する。メール固有の失敗(AI の出力を解析できない、など)だけを `ERROR` にする。
+
 失敗したメールは `ERROR` として記録し、スレッドを「要対応」にする。画面の「再処理」ボタンで再実行できる。
 
 ### 4.3 送信(`src/lib/pipeline/dispatch.ts`)

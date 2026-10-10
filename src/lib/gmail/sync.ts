@@ -4,7 +4,7 @@ import { prisma } from "@/lib/db";
 import { getEnv } from "@/lib/env";
 import { logActivity } from "@/lib/activity";
 import { defaultAiService, type AiService } from "@/lib/ai/service";
-import { errorMessage, shouldRetryLater } from "@/lib/errors";
+import { describeError, errorMessage, shouldRetryLater } from "@/lib/errors";
 import { getGmailForUser, type GmailContext } from "@/lib/gmail/client";
 import { parseGmailMessage, type ParsedGmailMessage } from "@/lib/gmail/parse";
 import { createGmailCaller, type GmailCaller } from "@/lib/gmail/throttle";
@@ -406,15 +406,16 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
           skippedIds.push(id);
         }
       } catch (error) {
-        result.errors.push(`message ${id}: ${errorMessage(error)}`);
         if (shouldRetryLater(error)) {
-          // 利用上限や通信の失敗、認証切れ。このメールから先は次回の同期で取り込む(同期位置は進めない)
+          // 利用上限や通信の失敗、API キーやログインの問題。このメールから先は次回の同期で取り込む(同期位置は進めない)
           console.error(`[sync] メッセージ ${id} の取り込みを中断し、次回に回します`, error);
+          result.errors.push(describeError(error));
           result.remaining = newIds.length - index;
           break;
         }
         // このメール固有の失敗。同期が先に進めなくなるのを防ぐため、このメールは飛ばす
         console.error(`[sync] メッセージ ${id} の取り込みに失敗したため、飛ばします`, error);
+        result.errors.push(`message ${id}: ${errorMessage(error)}`);
         result.skipped += 1;
         skippedIds.push(id);
       }
@@ -448,7 +449,7 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
       });
     }
   } catch (error) {
-    const message = errorMessage(error);
+    const message = describeError(error);
     result.errors.push(message);
     if (account) {
       await prisma.googleAccount.update({ where: { id: account.id }, data: { lastSyncError: message } });
