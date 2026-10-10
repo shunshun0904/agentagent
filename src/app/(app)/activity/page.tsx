@@ -76,10 +76,14 @@ export default async function ActivityPage({ searchParams }: { searchParams: Pro
           {logs.map((log) => {
             const href = entityHref(log.entityType, log.entityId) ?? (log.entityId && threadOf.get(log.entityId) ? `/inbox/${threadOf.get(log.entityId)}` : null);
             return (
-              <li key={log.id} className="flex items-start gap-4 px-4 py-2.5 text-sm">
-                <span className="w-36 shrink-0 text-xs text-slate-500">{formatDateTime(log.createdAt)}</span>
-                <span className="w-40 shrink-0 font-mono text-xs text-slate-400">{log.type}</span>
-                <span className="min-w-0 flex-1 text-slate-800">
+              <li key={log.id} className="flex flex-col gap-1 px-4 py-2.5 text-sm sm:flex-row sm:items-start sm:gap-4">
+                {/* スマートフォンでは日時と種類を1行にまとめ、本文をその下に表示する */}
+                <span className="text-xs text-slate-500 sm:w-36 sm:shrink-0">
+                  {formatDateTime(log.createdAt)}
+                  <span className="ml-2 font-mono text-slate-400 sm:hidden">{log.type}</span>
+                </span>
+                <span className="hidden w-40 shrink-0 font-mono text-xs text-slate-400 sm:block">{log.type}</span>
+                <span className="min-w-0 flex-1 break-words text-slate-800">
                   {log.message}
                   {href && (
                     <Link href={href} className="ml-2 text-xs text-indigo-600 hover:underline">

@@ -204,9 +204,28 @@ async function processOne(userId: string, message: PendingMessage, ai: AiService
     return;
   }
 
-  // 4. 返信しない条件の事前判定(返信案の生成を省く)
-  const [newAgent, autoRepliesRecent] = await Promise.all([isNewAgent(agent), countAutoRepliesRecent(thread.id, now())]);
+  // 4. 受信から日数が経ったメールには返信案を作らない(分類と案件の登録だけ行う)
+  //    取り込み範囲を広げた初回同期で、古いメールへの返信案が承認待ちにたまるのを防ぐ
   const ageHours = (now().getTime() - message.sentAt.getTime()) / 3_600_000;
+  const maxAgeDays = getEnv().REPLY_DRAFT_MAX_AGE_DAYS;
+  if (ageHours >= maxAgeDays * 24) {
+    await prisma.message.update({
+      where: { id: message.id },
+      data: { processingStatus: "PROCESSED", processedAt: now() },
+    });
+    await logActivity(userId, {
+      type: "reply.skipped",
+      entityType: "message",
+      entityId: message.id,
+      message: `「${message.subject}」には返信案を作りません: 受信から ${maxAgeDays} 日以上経っています`,
+    });
+    result.noReply += 1;
+    result.processed += 1;
+    return;
+  }
+
+  // 5. 返信しない条件の事前判定(返信案の生成を省く)
+  const [newAgent, autoRepliesRecent] = await Promise.all([isNewAgent(agent), countAutoRepliesRecent(thread.id, now())]);
   const baseDecisionInput = {
     policy,
     agent: agent ? { status: agent.status, autoReplyEnabled: agent.autoReplyEnabled, requireApproval: agent.requireApproval } : null,
@@ -241,7 +260,7 @@ async function processOne(userId: string, message: PendingMessage, ai: AiService
     return;
   }
 
-  // 5. 返信案の生成
+  // 6. 返信案の生成
   const draftResult = await ai.draftReply({
     ...analysisInput,
     policy,
@@ -288,7 +307,7 @@ async function processOne(userId: string, message: PendingMessage, ai: AiService
     data: { summary: draft.thread_summary, status: autoSend ? "OPEN" : "NEEDS_ACTION" },
   });
 
-  // 6. 案件ステージのヒント(手動で動かしていない NEW の案件のみ)
+  // 7. 案件ステージのヒント(手動で動かしていない NEW の案件のみ)
   if (draft.opportunity_stage_hint && draft.opportunity_stage_hint !== "NEW" && opportunityIds.length > 0) {
     await prisma.opportunity.updateMany({
       where: { id: { in: opportunityIds }, stage: "NEW" },

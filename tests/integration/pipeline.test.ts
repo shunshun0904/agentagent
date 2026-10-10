@@ -19,8 +19,19 @@ if (DB_URL) {
 const ME = "me@example.com";
 const AGENT_DOMAIN = "agent.example.jp";
 const OTHER_DOMAIN = "other-agent.example.jp";
+const THIRD_DOMAIN = "third-agent.example.jp";
+const FOURTH_DOMAIN = "fourth-agent.example.jp";
 
-type FakeMailbox = { messages: gmail_v1.Schema$Message[]; sent: { raw: string; threadId: string }[] };
+type FakeMailbox = {
+  messages: gmail_v1.Schema$Message[];
+  sent: { raw: string; threadId: string }[];
+  /** messages.get で取得したメール ID(取得の重複を確かめる) */
+  fetched: string[];
+  /** メール ID ごとに、残りの回数だけ利用上限エラーを返す */
+  rateLimited: Map<string, number>;
+  /** messages.list に渡された検索条件 */
+  queries: string[];
+};
 
 function b64url(text: string): string {
   return Buffer.from(text, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -65,15 +76,24 @@ function fakeGmail(box: FakeMailbox) {
   const gmail = {
     users: {
       messages: {
-        list: async () => ({
-          data: {
-            // Gmail API と同じく新しい順に返す
-            messages: [...box.messages]
-              .sort((a, b) => Number(b.internalDate) - Number(a.internalDate))
-              .map((m) => ({ id: m.id, threadId: m.threadId })),
-          },
-        }),
+        list: async ({ q }: { q: string }) => {
+          box.queries.push(q);
+          return {
+            data: {
+              // Gmail API と同じく新しい順に返す
+              messages: [...box.messages]
+                .sort((a, b) => Number(b.internalDate) - Number(a.internalDate))
+                .map((m) => ({ id: m.id, threadId: m.threadId })),
+            },
+          };
+        },
         get: async ({ id }: { id: string }) => {
+          box.fetched.push(id);
+          const failures = box.rateLimited.get(id) ?? 0;
+          if (failures > 0) {
+            box.rateLimited.set(id, failures - 1);
+            throw Object.assign(new Error("Quota exceeded for quota metric 'Queries' and limit 'Queries per minute per user'"), { code: 429 });
+          }
           const found = box.messages.find((m) => m.id === id);
           if (!found) throw new Error(`not found: ${id}`);
           return { data: found };
@@ -117,7 +137,7 @@ function fakeAi() {
     service: {
       async checkSender(input: { fromEmail: string }) {
         calls.checkSender += 1;
-        const isAgent = input.fromEmail.endsWith(`@${AGENT_DOMAIN}`) || input.fromEmail.endsWith(`@${OTHER_DOMAIN}`);
+        const isAgent = [AGENT_DOMAIN, OTHER_DOMAIN, THIRD_DOMAIN, FOURTH_DOMAIN].some((d) => input.fromEmail.endsWith(`@${d}`));
         return {
           data: { is_freelance_agent: isAgent, confidence: 0.95, company_name: isAgent ? "株式会社テスト" : null, person_name: null, reason: "test" },
           model: "fake",
@@ -192,7 +212,7 @@ function fakeAi() {
 describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
   const email = `it-${randomUUID()}@example.com`;
   let userId = "";
-  const box: FakeMailbox = { messages: [], sent: [] };
+  const box: FakeMailbox = { messages: [], sent: [], fetched: [], rateLimited: new Map(), queries: [] };
   const ai = fakeAi();
 
   // モジュールは環境変数を設定した後に読み込む
@@ -202,7 +222,7 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
   let encryptSecret: typeof import("@/lib/crypto").encryptSecret;
   let ensureUserDefaults: typeof import("@/lib/policy/defaults").ensureUserDefaults;
 
-  const deps = () => ({ ai: ai.service as never, gmail: fakeGmail(box) });
+  const deps = () => ({ ai: ai.service as never, gmail: fakeGmail(box), gmailMinIntervalMs: 0, sleep: async () => {} });
 
   beforeAll(async () => {
     ({ prisma } = await import("@/lib/db"));
@@ -284,9 +304,15 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     const opps = await prisma.opportunity.findMany({ where: { userId } });
     expect(opps.map((o) => o.title)).toEqual(["Go バックエンド開発"]);
 
-    // 同期位置が進んでいる
+    // 初回は取り込み範囲(既定 30 日)全体を一覧し、取り込みを済ませた日数と同期位置を記録する
+    expect(box.queries[0]).toContain("newer_than:30d");
     const account = await prisma.googleAccount.findUniqueOrThrow({ where: { userId } });
     expect(account.lastSyncedAt).not.toBeNull();
+    expect(account.syncedLookbackDays).toBe(30);
+
+    // 除外したメール(m3)は記録し、次回以降は取得し直さない
+    const skipped = await prisma.skippedMessage.findMany({ where: { userId } });
+    expect(skipped.map((x) => x.gmailMessageId)).toEqual(["m3"]);
   });
 
   it("新着メールで古い返信案を取り消し、条件を満たせば自動送信を予約する", async () => {
@@ -355,8 +381,7 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     const before = await prisma.googleAccount.findUniqueOrThrow({ where: { userId } });
 
     const r = await runTick(userId, { ...deps(), budgetSeconds: -1 });
-    // エージェント以外のメール(m3)は保存しないため、同期範囲内にあれば毎回の取得対象に含まれる
-    expect(r.sync?.remaining).toBeGreaterThanOrEqual(1);
+    expect(r.sync?.remaining).toBe(1);
     expect(r.sync?.ingested).toBe(0);
     expect(r.process?.deferred ?? 0).toBe(0);
     const mid = await prisma.googleAccount.findUniqueOrThrow({ where: { userId } });
@@ -365,5 +390,127 @@ describe.skipIf(!DB_URL)("パイプライン結合テスト", () => {
     const r2 = await runTick(userId, deps());
     expect(r2.sync?.ingested).toBe(1);
     expect(r2.process?.processed).toBe(1);
+  });
+
+  it("一斉配信でも担当者のアドレスは AI で判定し、no-reply は判定せずに除外する", async () => {
+    const bulk = [{ name: "List-Unsubscribe", value: "<mailto:unsubscribe@example.com>" }];
+    box.messages.push(
+      mail({ id: "m9", threadId: "t7", from: `田中 <tanaka@${THIRD_DOMAIN}>`, subject: "【案件のご紹介】React案件", body: "新着案件です", minutesAgo: 30, extraHeaders: bulk }),
+      mail({ id: "m10", threadId: "t8", from: "お知らせ <noreply@service.example.com>", subject: "お知らせ", body: "キャンペーン", minutesAgo: 20, extraHeaders: bulk }),
+    );
+    const checksBefore = ai.calls.checkSender;
+
+    const r = await runTick(userId, deps());
+    expect(r.errors).toEqual([]);
+    expect(r.sync?.ingested).toBe(1);
+    expect(r.sync?.skipped).toBe(1);
+    expect(r.sync?.newAgents).toBe(1);
+    expect(ai.calls.checkSender - checksBefore).toBe(1); // m9 だけ AI で判定
+
+    const agent = await prisma.agent.findFirst({ where: { userId, domains: { has: THIRD_DOMAIN } } });
+    expect(agent).not.toBeNull();
+    const verdict = await prisma.senderVerdict.findUniqueOrThrow({ where: { userId_email: { userId, email: "noreply@service.example.com" } } });
+    expect(verdict.kind).toBe("NOT_AGENT");
+    expect(verdict.reason).toBe("自動送信または no-reply のアドレス");
+  });
+
+  it("同期位置を戻しても、取り込み済みと除外済みのメールは取得し直さない", async () => {
+    await prisma.googleAccount.update({ where: { userId }, data: { lastSyncedAt: null } });
+    box.fetched.length = 0;
+
+    const r = await runTick(userId, deps());
+    expect(r.errors).toEqual([]);
+    expect(r.sync?.listed).toBe(box.messages.length);
+    expect(r.sync?.fetched).toBe(0);
+    expect(box.fetched).toEqual([]);
+  });
+
+  it("利用上限のエラーは待ってやり直し、続くときは飛ばさずに次回へ回す", async () => {
+    // 2回失敗してから成功する(同じ同期の中でやり直す)
+    box.messages.push(mail({ id: "m11", threadId: "t9", from: `佐藤 <sato@${AGENT_DOMAIN}>`, subject: "面談日程のご相談", body: "日程はいかがでしょうか", minutesAgo: 4 }));
+    box.rateLimited.set("m11", 2);
+    const r1 = await runTick(userId, deps());
+    expect(r1.errors).toEqual([]);
+    expect(r1.sync?.ingested).toBe(1);
+
+    // やり直しの回数を超えて失敗する
+    box.messages.push(mail({ id: "m12", threadId: "t10", from: `佐藤 <sato@${AGENT_DOMAIN}>`, subject: "スキルシートのお願い", body: "ご送付ください", minutesAgo: 3 }));
+    box.rateLimited.set("m12", 4);
+    const before = await prisma.googleAccount.findUniqueOrThrow({ where: { userId } });
+    const r2 = await runTick(userId, deps());
+    expect(r2.sync?.ingested).toBe(0);
+    expect(r2.sync?.remaining).toBe(1);
+    expect(r2.sync?.errors.join()).toContain("Quota exceeded");
+    const mid = await prisma.googleAccount.findUniqueOrThrow({ where: { userId } });
+    expect(mid.lastSyncedAt?.getTime()).toBe(before.lastSyncedAt?.getTime());
+    expect(mid.lastSyncError).toContain("Quota exceeded");
+    expect(await prisma.skippedMessage.count({ where: { userId, gmailMessageId: "m12" } })).toBe(0);
+
+    // 次回の同期で取り込む
+    const r3 = await runTick(userId, deps());
+    expect(r3.sync?.ingested).toBe(1);
+    expect(await prisma.message.count({ where: { gmailMessageId: "m12" } })).toBe(1);
+    const after = await prisma.googleAccount.findUniqueOrThrow({ where: { userId } });
+    expect(after.lastSyncError).toBeNull();
+  });
+
+  it("受信から7日以上経ったメールは分類と案件の登録だけ行い、返信案は作らない", async () => {
+    box.messages.push(
+      mail({ id: "m13", threadId: "t11", from: `佐藤 <sato@${AGENT_DOMAIN}>`, subject: "【案件のご紹介】古い案件", body: "ご紹介です", minutesAgo: 8 * 24 * 60 }),
+    );
+    const draftsBefore = ai.calls.draft;
+
+    const r = await runTick(userId, deps());
+    expect(r.errors).toEqual([]);
+    expect(r.sync?.ingested).toBe(1);
+    expect(r.process?.noReply).toBe(1);
+    expect(ai.calls.draft).toBe(draftsBefore);
+
+    const message = await prisma.message.findFirstOrThrow({ where: { gmailMessageId: "m13" }, include: { thread: { include: { replies: true } } } });
+    expect(message.processingStatus).toBe("PROCESSED");
+    expect(message.category).toBe("JOB_PROPOSAL");
+    expect(message.thread.replies).toHaveLength(0);
+    const log = await prisma.activityLog.findFirst({ where: { userId, entityId: message.id, type: "reply.skipped" } });
+    expect(log?.message).toContain("7 日以上経っています");
+  });
+
+  it("取り込み範囲を広げたときは範囲全体を一覧し直し、終わったら前回以降の取得に戻る", async () => {
+    await prisma.googleAccount.update({ where: { userId }, data: { syncedLookbackDays: 7 } });
+    box.queries.length = 0;
+
+    const r1 = await runTick(userId, deps());
+    expect(r1.errors).toEqual([]);
+    expect(box.queries.at(-1)).toContain("newer_than:30d");
+    const account = await prisma.googleAccount.findUniqueOrThrow({ where: { userId } });
+    expect(account.syncedLookbackDays).toBe(30);
+
+    await runTick(userId, deps());
+    expect(box.queries.at(-1)).toMatch(/after:\d+/);
+  });
+
+  it("旧バージョンが一斉配信として除外した送信者は、AI で判定し直す", async () => {
+    const email = `yamamoto@${FOURTH_DOMAIN}`;
+    await prisma.senderVerdict.create({
+      data: { userId, email, domain: FOURTH_DOMAIN, kind: "NOT_AGENT", reason: "一斉配信または自動送信アドレス" },
+    });
+    box.messages.push(
+      mail({
+        id: "m14",
+        threadId: "t12",
+        from: `山本 <${email}>`,
+        subject: "【案件のご紹介】Python案件",
+        body: "新着案件です",
+        minutesAgo: 2,
+        extraHeaders: [{ name: "List-Unsubscribe", value: "<mailto:unsubscribe@example.com>" }],
+      }),
+    );
+    const checksBefore = ai.calls.checkSender;
+
+    const r = await runTick(userId, deps());
+    expect(r.errors).toEqual([]);
+    expect(r.sync?.ingested).toBe(1);
+    expect(ai.calls.checkSender - checksBefore).toBe(1);
+    const verdict = await prisma.senderVerdict.findUniqueOrThrow({ where: { userId_email: { userId, email } } });
+    expect(verdict.kind).toBe("AGENT");
   });
 });

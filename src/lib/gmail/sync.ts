@@ -4,8 +4,10 @@ import { prisma } from "@/lib/db";
 import { getEnv } from "@/lib/env";
 import { logActivity } from "@/lib/activity";
 import { defaultAiService, type AiService } from "@/lib/ai/service";
+import { errorMessage, shouldRetryLater } from "@/lib/errors";
 import { getGmailForUser, type GmailContext } from "@/lib/gmail/client";
 import { parseGmailMessage, type ParsedGmailMessage } from "@/lib/gmail/parse";
+import { createGmailCaller, type GmailCaller } from "@/lib/gmail/throttle";
 import { extractDomain, isFreeMailDomain, looksLikeNoReply, truncate } from "@/lib/text";
 
 export type SyncResult = {
@@ -13,9 +15,11 @@ export type SyncResult = {
   fetched: number;
   ingested: number;
   skipped: number;
+  /** AI の送信者判定の上限に達したため、次回の同期に回した件数 */
+  deferred: number;
   newAgents: number;
   senderChecks: number;
-  /** 時間切れで取り込まずに残した件数(次回の同期で取り込む) */
+  /** 時間切れや一時的なエラーで取り込まずに残した件数(次回の同期で取り込む) */
   remaining: number;
   errors: string[];
 };
@@ -26,9 +30,16 @@ export type SyncDeps = {
   now?: () => Date;
   /** この時刻(epoch ミリ秒)を過ぎたら新しいメールの取り込みを始めない */
   deadline?: number;
+  /** Gmail API の呼び出し間隔の最小値(ミリ秒)。テストでは 0 にする */
+  gmailMinIntervalMs?: number;
+  /** 待機処理(テストで差し替える) */
+  sleep?: (ms: number) => Promise<void>;
 };
 
-type IngestOutcome = "ingested" | "skipped";
+/** 取り込まなかったメールの記録を残す日数(取り込み範囲の日数に足す) */
+const SKIPPED_RETENTION_EXTRA_DAYS = 7;
+
+type IngestOutcome = "ingested" | "skipped" | "deferred";
 
 type SyncState = {
   userId: string;
@@ -42,10 +53,13 @@ type SyncState = {
   result: SyncResult;
 };
 
-function buildQuery(lastSyncedAt: Date | null): string {
+/** 旧バージョンが一斉配信を一律に除外したときの判定理由。この判定は使わずに判定し直す */
+const LEGACY_BULK_VERDICT_REASON = "一斉配信または自動送信アドレス";
+
+function buildQuery(lastSyncedAt: Date | null, fullWindow: boolean): string {
   const env = getEnv();
   const base = env.GMAIL_SYNC_QUERY?.trim() || "-in:spam -in:trash -in:chats";
-  if (lastSyncedAt) {
+  if (lastSyncedAt && !fullWindow) {
     // 取りこぼしを防ぐため1時間重ねて取得する(重複は ID で除外)
     const after = Math.floor((lastSyncedAt.getTime() - 60 * 60 * 1000) / 1000);
     return `${base} after:${after}`;
@@ -53,16 +67,18 @@ function buildQuery(lastSyncedAt: Date | null): string {
   return `${base} newer_than:${env.GMAIL_SYNC_LOOKBACK_DAYS}d`;
 }
 
-async function listMessageIds(gmail: gmail_v1.Gmail, query: string, max: number): Promise<string[]> {
+async function listMessageIds(gmail: gmail_v1.Gmail, call: GmailCaller, query: string, max: number): Promise<string[]> {
   const ids: string[] = [];
   let pageToken: string | undefined;
   do {
-    const { data } = await gmail.users.messages.list({
-      userId: "me",
-      q: query,
-      maxResults: Math.min(100, max - ids.length),
-      pageToken,
-    });
+    const { data } = await call(() =>
+      gmail.users.messages.list({
+        userId: "me",
+        q: query,
+        maxResults: Math.min(100, max - ids.length),
+        pageToken,
+      }),
+    );
     for (const m of data.messages ?? []) {
       if (m.id) ids.push(m.id);
     }
@@ -117,7 +133,7 @@ async function resolveAgentForInbound(state: SyncState, parsed: ParsedGmailMessa
   const verdict = await prisma.senderVerdict.findUnique({
     where: { userId_email: { userId: state.userId, email } },
   });
-  if (verdict?.kind === "NOT_AGENT") return null;
+  if (verdict?.kind === "NOT_AGENT" && verdict.reason !== LEGACY_BULK_VERDICT_REASON) return null;
   if (verdict?.kind === "AGENT") {
     const contact = await prisma.contact.findUnique({
       where: { userId_email: { userId: state.userId, email } },
@@ -126,12 +142,14 @@ async function resolveAgentForInbound(state: SyncState, parsed: ParsedGmailMessa
     if (contact) return contact.agent;
   }
 
-  // 一斉配信や自動送信アドレスからの未知の送信者は判定せずに除外する
-  if (parsed.isBulk || parsed.isAutoSubmitted || looksLikeNoReply(email)) {
+  // 自動送信のメールや no-reply のアドレスからの未知の送信者は、判定せずに除外する。
+  // 一斉配信(List-Unsubscribe など)は除外しない。エージェントの担当者が配信システムで案件紹介を送ることがあるため
+  if (parsed.isAutoSubmitted || looksLikeNoReply(email)) {
+    const reason = "自動送信または no-reply のアドレス";
     await prisma.senderVerdict.upsert({
       where: { userId_email: { userId: state.userId, email } },
-      create: { userId: state.userId, email, domain, kind: "NOT_AGENT", reason: "一斉配信または自動送信アドレス" },
-      update: {},
+      create: { userId: state.userId, email, domain, kind: "NOT_AGENT", reason },
+      update: verdict?.reason === LEGACY_BULK_VERDICT_REASON ? { reason } : {},
     });
     return null;
   }
@@ -207,7 +225,8 @@ async function ingestParsedMessage(state: SyncState, parsed: ParsedGmailMessage)
     agentId = contact.agentId;
   } else {
     const resolved = await resolveAgentForInbound(state, parsed);
-    if (resolved === "deferred" || resolved === null) return "skipped";
+    if (resolved === "deferred") return "deferred";
+    if (resolved === null) return "skipped";
     const agent = resolved;
     const contact = await prisma.contact.upsert({
       where: { userId_email: { userId, email: parsed.from.email } },
@@ -322,11 +341,13 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
     fetched: 0,
     ingested: 0,
     skipped: 0,
+    deferred: 0,
     newAgents: 0,
     senderChecks: 0,
     remaining: 0,
     errors: [],
   };
+  const call = createGmailCaller({ minIntervalMs: deps.gmailMinIntervalMs, sleep: deps.sleep, deadline: deps.deadline });
   const agents = await prisma.agent.findMany({ where: { userId } });
   const domainToAgent = new Map<string, Agent>();
   for (const agent of agents) {
@@ -344,16 +365,29 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
   };
 
   try {
-    const query = buildQuery(account?.lastSyncedAt ?? null);
-    const ids = await listMessageIds(ctx.gmail, query, env.GMAIL_SYNC_MAX_MESSAGES);
+    // 初回や取り込み範囲を広げた後は、範囲全体を一覧する(取り込み済み・除外済みのメールは取得しない)
+    const fullWindow = (account?.syncedLookbackDays ?? 0) < env.GMAIL_SYNC_LOOKBACK_DAYS;
+    const query = buildQuery(account?.lastSyncedAt ?? null, fullWindow);
+    const ids = await listMessageIds(ctx.gmail, call, query, env.GMAIL_SYNC_MAX_MESSAGES);
     result.listed = ids.length;
 
-    const known = await prisma.message.findMany({
-      where: { gmailMessageId: { in: ids } },
-      select: { gmailMessageId: true },
-    });
-    const knownIds = new Set(known.map((m) => m.gmailMessageId));
+    // 取り込み済みのメールと、前回までに除外したメールは取得し直さない
+    const [knownMessages, knownSkipped] = await Promise.all([
+      prisma.message.findMany({ where: { gmailMessageId: { in: ids } }, select: { gmailMessageId: true } }),
+      prisma.skippedMessage.findMany({ where: { userId, gmailMessageId: { in: ids } }, select: { gmailMessageId: true } }),
+    ]);
+    const knownIds = new Set([...knownMessages, ...knownSkipped].map((m) => m.gmailMessageId));
     const newIds = ids.filter((id) => !knownIds.has(id)).reverse(); // 古い順に処理
+
+    const skippedIds: string[] = [];
+    const flushSkipped = async () => {
+      const batch = skippedIds.splice(0);
+      if (batch.length === 0) return;
+      await prisma.skippedMessage.createMany({
+        data: batch.map((gmailMessageId) => ({ userId, gmailMessageId })),
+        skipDuplicates: true,
+      });
+    };
 
     for (const [index, id] of newIds.entries()) {
       if (deps.deadline !== undefined && Date.now() > deps.deadline) {
@@ -361,34 +395,60 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
         break;
       }
       try {
-        const { data } = await ctx.gmail.users.messages.get({ userId: "me", id, format: "full" });
+        const { data } = await call(() => ctx.gmail.users.messages.get({ userId: "me", id, format: "full" }));
         result.fetched += 1;
         const parsed = parseGmailMessage(data);
         const outcome = await ingestParsedMessage(state, parsed);
         if (outcome === "ingested") result.ingested += 1;
-        else result.skipped += 1;
+        else if (outcome === "deferred") result.deferred += 1;
+        else {
+          result.skipped += 1;
+          skippedIds.push(id);
+        }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        result.errors.push(`message ${id}: ${message}`);
-        console.error(`[sync] メッセージ ${id} の取り込みに失敗しました`, error);
+        result.errors.push(`message ${id}: ${errorMessage(error)}`);
+        if (shouldRetryLater(error)) {
+          // 利用上限や通信の失敗、認証切れ。このメールから先は次回の同期で取り込む(同期位置は進めない)
+          console.error(`[sync] メッセージ ${id} の取り込みを中断し、次回に回します`, error);
+          result.remaining = newIds.length - index;
+          break;
+        }
+        // このメール固有の失敗。同期が先に進めなくなるのを防ぐため、このメールは飛ばす
+        console.error(`[sync] メッセージ ${id} の取り込みに失敗したため、飛ばします`, error);
+        result.skipped += 1;
+        skippedIds.push(id);
       }
+      if (skippedIds.length >= 50) await flushSkipped();
     }
+    await flushSkipped();
+
+    // 取り込み範囲より十分古い除外記録は消す
+    const retentionDays = env.GMAIL_SYNC_LOOKBACK_DAYS + SKIPPED_RETENTION_EXTRA_DAYS;
+    await prisma.skippedMessage.deleteMany({
+      where: { userId, createdAt: { lt: new Date(startedAt.getTime() - retentionDays * 86_400_000) } },
+    });
 
     if (account) {
-      // 時間切れで残したメールがある場合は同期位置を進めない(次回、同じ範囲を取得し既知の ID を除外して続きから取り込む)
+      // 時間切れなどで残したメールがある場合は同期位置を進めない(次回、同じ範囲を取得し既知の ID を除外して続きから取り込む)
       const nextSyncedAt =
         result.remaining > 0
           ? account.lastSyncedAt
           : state.deferredFrom && state.deferredFrom < startedAt
             ? state.deferredFrom
             : startedAt;
+      // 範囲全体を残さず取り込めたら、次回からは前回の同期以降だけを取得する
+      const windowCompleted = fullWindow && result.remaining === 0 && state.deferredFrom === null;
       await prisma.googleAccount.update({
         where: { id: account.id },
-        data: { lastSyncedAt: nextSyncedAt, lastSyncError: result.errors.length > 0 ? result.errors[0] : null },
+        data: {
+          lastSyncedAt: nextSyncedAt,
+          lastSyncError: result.errors.length > 0 ? result.errors[0] : null,
+          ...(windowCompleted ? { syncedLookbackDays: env.GMAIL_SYNC_LOOKBACK_DAYS } : {}),
+        },
       });
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     result.errors.push(message);
     if (account) {
       await prisma.googleAccount.update({ where: { id: account.id }, data: { lastSyncError: message } });
@@ -396,9 +456,10 @@ export async function syncUserMailbox(userId: string, deps: SyncDeps = {}): Prom
     throw error;
   }
 
+  const carriedOver = result.remaining + result.deferred;
   await logActivity(userId, {
     type: "sync.completed",
-    message: `Gmail 同期: ${result.ingested} 件取り込み、${result.skipped} 件除外、新規エージェント ${result.newAgents} 件${result.remaining > 0 ? `、時間切れのため ${result.remaining} 件は次回に取り込み` : ""}`,
+    message: `Gmail 同期: ${result.ingested} 件取り込み、${result.skipped} 件除外、新規エージェント ${result.newAgents} 件${carriedOver > 0 ? `、${carriedOver} 件は次回に取り込み` : ""}`,
     metadata: { ...result },
   });
   return result;

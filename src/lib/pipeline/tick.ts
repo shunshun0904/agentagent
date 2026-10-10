@@ -24,6 +24,10 @@ export type TickDeps = {
   now?: () => Date;
   /** 1回の実行に使える時間(秒)。省略時は TICK_TIME_BUDGET_SECONDS */
   budgetSeconds?: number;
+  /** Gmail API の呼び出し間隔の最小値(ミリ秒)。テストでは 0 にする */
+  gmailMinIntervalMs?: number;
+  /** 待機処理(テストで差し替える) */
+  sleep?: (ms: number) => Promise<void>;
 };
 
 /** ロックの有効期限に足す余裕。処理が予算を超えて長引いても、この時間内は二重実行しない */

@@ -20,12 +20,13 @@ const EnvSchema = z.object({
   CRON_SECRET: z.string().optional(),
   DEV_LOGIN_ENABLED: z.string().optional(),
   GMAIL_SYNC_QUERY: z.string().optional(),
-  GMAIL_SYNC_LOOKBACK_DAYS: z.coerce.number().int().positive().default(7),
-  GMAIL_SYNC_MAX_MESSAGES: z.coerce.number().int().positive().default(200),
+  GMAIL_SYNC_LOOKBACK_DAYS: z.coerce.number().int().positive().default(30),
+  GMAIL_SYNC_MAX_MESSAGES: z.coerce.number().int().positive().default(5000),
   SENDER_CHECKS_PER_SYNC: z.coerce.number().int().nonnegative().default(40),
   SYNC_INTERVAL_SECONDS: z.coerce.number().int().positive().default(300),
   TICK_TIME_BUDGET_SECONDS: z.coerce.number().int().positive().default(240),
   STALE_REPLY_HOURS: z.coerce.number().int().positive().default(72),
+  REPLY_DRAFT_MAX_AGE_DAYS: z.coerce.number().int().positive().default(7),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

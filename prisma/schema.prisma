@@ -125,17 +125,18 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  googleAccount  GoogleAccount?
-  sessions       Session[]
-  profile        Profile?
-  policy         ReplyPolicy?
-  agents         Agent[]
-  contacts       Contact[]
-  senderVerdicts SenderVerdict[]
-  threads        Thread[]
-  replies        Reply[]
-  opportunities  Opportunity[]
-  activityLogs   ActivityLog[]
+  googleAccount   GoogleAccount?
+  sessions        Session[]
+  profile         Profile?
+  policy          ReplyPolicy?
+  agents          Agent[]
+  contacts        Contact[]
+  senderVerdicts  SenderVerdict[]
+  skippedMessages SkippedMessage[]
+  threads         Thread[]
+  replies         Reply[]
+  opportunities   Opportunity[]
+  activityLogs    ActivityLog[]
 }
 
 model Session {
@@ -161,6 +162,8 @@ model GoogleAccount {
   accessTokenExpiresAt  DateTime?
   scopes                String
   lastSyncedAt          DateTime?
+  /// 取り込みを済ませた過去の日数。GMAIL_SYNC_LOOKBACK_DAYS より小さい(または未設定の)間は、範囲全体を取り込み直す
+  syncedLookbackDays    Int?
   lastSyncError         String?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
@@ -443,6 +446,17 @@ model ActivityLog {
 // ---------------------------------------------------------------------------
 // 定期処理のロック
 // ---------------------------------------------------------------------------
+
+/// 同期で取り込まなかった Gmail のメール(エージェント以外など)。次回以降の同期で取得し直さないために記録する
+model SkippedMessage {
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  gmailMessageId String
+  createdAt      DateTime @default(now())
+
+  @@id([userId, gmailMessageId])
+  @@index([createdAt])
+}
 
 /// 定期処理(同期・分析・送信)の多重実行を防ぐための期限付きロック。
 /// cron と「今すぐ同期」が重なっても、同じユーザーの処理は同時に1つしか動かない。
