@@ -135,6 +135,7 @@ ensure_secret() {
     ok "  - ${secret_id}: 登録しました"
   else
     ok "  - ${secret_id}: 登録済み"
+    prune_secret_versions "${secret_id}"
   fi
 
   gcloud secrets add-iam-policy-binding "${secret_id}" \

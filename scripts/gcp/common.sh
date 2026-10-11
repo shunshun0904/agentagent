@@ -129,6 +129,20 @@ write_secret() {
     gcloud secrets create "${secret_id}" --replication-policy automatic --project "${PROJECT_ID}" --quiet >/dev/null
   fi
   printf '%s' "${value}" | gcloud secrets versions add "${secret_id}" --data-file=- --project "${PROJECT_ID}" --quiet >/dev/null
+  prune_secret_versions "${secret_id}"
+}
+
+# 最新以外のバージョンを破棄する。
+# 有効・無効を問わず破棄していないバージョンは Secret Manager の無料枠(月 6 個)に数えられ、
+# 超えると 1 個あたり月 0.06 ドルかかるため。このアプリは常に最新のバージョンだけを使う
+prune_secret_versions() {
+  local secret_id="$1" versions latest v
+  versions="$(gcloud secrets versions list "${secret_id}" --project "${PROJECT_ID}" --filter="state!=destroyed" --format="value(name.basename())" 2>/dev/null || true)"
+  latest="$(printf '%s\n' "${versions}" | sort -n | tail -1)"
+  for v in ${versions}; do
+    [[ -z "${v}" || "${v}" == "${latest}" ]] && continue
+    gcloud secrets versions destroy "${v}" --secret "${secret_id}" --project "${PROJECT_ID}" --quiet >/dev/null 2>&1 || true
+  done
 }
 
 # psql のエラー内容から原因の見当を表示する
