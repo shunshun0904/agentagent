@@ -76,7 +76,7 @@ export default async function DashboardPage() {
         ))}
       {syncRemaining > 0 && (
         <Notice tone="info">
-          メールを取り込んでいます: 残り {syncRemaining.toLocaleString("ja-JP")} 件(5 分ごとに続きを取り込みます)
+          メールを取り込んでいます: 残り {syncRemaining.toLocaleString("ja-JP")} 件(定期処理は 1 時間ごと。「今すぐ同期」でも続きを取り込めます)
         </Notice>
       )}
 

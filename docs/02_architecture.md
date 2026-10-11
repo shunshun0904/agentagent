@@ -9,7 +9,7 @@ flowchart LR
   Agent((エージェントの<br/>営業担当者)) -- メール --> GM[(Gmail)]
   GM -- 返信メール --> Agent
   subgraph GCP["Google Cloud(東京)"]
-    Sched[Cloud Scheduler<br/>5分ごと]
+    Sched[Cloud Scheduler<br/>1時間ごと]
     subgraph App["Cloud Run: エージェントエージェント(Next.js)"]
       UI[画面<br/>App Router]
       SA[サーバーアクション]
@@ -33,7 +33,7 @@ flowchart LR
   SM -.-> App
 ```
 
-単一の Next.js アプリケーションに、画面、API、ビジネスロジックをまとめ、1つのコンテナとして Cloud Run で動かす。定期処理(同期・分析・送信)は Cloud Scheduler が 5 分ごとに cron エンドポイントを呼んで実行する。同じ処理は画面の「今すぐ同期」ボタンと、ローカル開発用のワーカープロセスからも呼び出せる。セットアップと運用手順は `05_cloud_deployment.md` を参照。
+単一の Next.js アプリケーションに、画面、API、ビジネスロジックをまとめ、1つのコンテナとして Cloud Run で動かす。定期処理(同期・分析・送信)は Cloud Scheduler が 1 時間ごとに cron エンドポイントを呼んで実行する。同じ処理は画面の「今すぐ同期」ボタンと、ローカル開発用のワーカープロセスからも呼び出せる。セットアップと運用手順は `05_cloud_deployment.md` を参照。
 
 ## 2. 技術スタック
 
@@ -205,7 +205,7 @@ erDiagram
 
 | 方法 | 用途 | 仕組み |
 | --- | --- | --- |
-| Cloud Scheduler → `GET /api/cron/tick` | 本番(標準) | 5 分ごとに呼ぶ。`x-cron-secret` ヘッダー(または `Authorization: Bearer`)を `CRON_SECRET` と照合 |
+| Cloud Scheduler → `GET /api/cron/tick` | 本番(標準) | 1 時間ごとに呼ぶ(`SCHEDULE` で変更可能)。`x-cron-secret` ヘッダー(または `Authorization: Bearer`)を `CRON_SECRET` と照合 |
 | 画面の「今すぐ同期」ボタン | 手動実行 | サーバーアクションから tick を実行し、活動ログへ遷移 |
 | ワーカープロセス `npm run worker` | ローカル開発、VPS で常駐させる場合 | `SYNC_INTERVAL_SECONDS` ごとに全ユーザー分の tick を実行 |
 
@@ -215,7 +215,7 @@ erDiagram
 2. 送信予定時刻を過ぎた返信の送信
 3. 未処理メールの分析と返信案の作成(時間予算の残りまで)
 
-時間予算は `TICK_TIME_BUDGET_SECONDS`(既定 240 秒)。同じユーザーの tick は `JobLock` テーブルの期限付きロックで同時に1つしか動かず、重なった場合は後から始まった方が何もせずに終わる。ロックの期限は時間予算に 10 分を足した長さで、プロセスが途中で落ちても期限が来れば次の実行が取得できる。各段階は独立して例外を捕捉するため、Gmail 未連携でも処理と送信は実行される。
+時間予算は `TICK_TIME_BUDGET_SECONDS`(既定 480 秒。Cloud Scheduler の試行期限 600 秒と Cloud Run のタイムアウト 900 秒に収まる値)。同じユーザーの tick は `JobLock` テーブルの期限付きロックで同時に1つしか動かず、重なった場合は後から始まった方が何もせずに終わる。ロックの期限は時間予算に 10 分を足した長さで、プロセスが途中で落ちても期限が来れば次の実行が取得できる。各段階は独立して例外を捕捉するため、Gmail 未連携でも処理と送信は実行される。
 
 ## 7. 認証とセキュリティ
 
@@ -239,7 +239,7 @@ erDiagram
 - DB は Supabase の接続プール(Supavisor)を使う。アプリは Transaction pooler(ポート 6543)、マイグレーションは Session pooler(ポート 5432)。Supabase の直接接続は IPv6 専用のため使わない。
 - アプリの DB 接続は `DATABASE_SSL=no-verify` で TLS 暗号化する。Supabase の証明書は独自の認証局が発行しており、node-postgres は `sslmode=require` を証明書の完全検証として扱うため、接続文字列の sslmode ではなく `DATABASE_SSL` で制御する。CA 証明書を `DATABASE_CA_CERT` に設定すれば `DATABASE_SSL=verify` で検証まで行える。
 - Cloud Run の設定: 東京リージョン、未認証アクセス許可(アプリ側でログインを要求)、CPU 1、メモリ 1 GiB、タイムアウト 900 秒、同時リクエスト 20、インスタンス 0〜2。
-- Cloud Scheduler の設定: `*/5 * * * *`(Asia/Tokyo)、試行期限 600 秒。
+- Cloud Scheduler の設定: `0 * * * *`(毎時 0 分、Asia/Tokyo)、試行期限 600 秒。返信の送信も定期処理のタイミングで行うため、送信予定時刻から最大 1 時間遅れる。
 - セットアップは `scripts/gcp/setup.sh` が行う。手順は `05_cloud_deployment.md`。
 
 ### 8.2 その他の環境
@@ -264,20 +264,20 @@ erDiagram
 | AGENTAGENT_MODEL | 任意 | 既定 `claude-haiku-5-5`(`claude-sonnet-5-5`、`claude-opus-5-5` も指定できる) |
 | AGENTAGENT_DRAFT_EFFORT / AGENTAGENT_ANALYSIS_EFFORT | 任意 | 既定 `medium` / `low` |
 | CRON_SECRET | cron 利用時に必須 | cron エンドポイントの認証 |
-| TICK_TIME_BUDGET_SECONDS | 任意 | 1 回の定期処理の時間予算(既定 240 秒) |
+| TICK_TIME_BUDGET_SECONDS | 任意 | 1 回の定期処理の時間予算(既定 480 秒) |
 | STALE_REPLY_HOURS | 任意 | この時間以上経ったメールへの返信は承認制(既定 72 時間) |
 | REPLY_DRAFT_MAX_AGE_DAYS | 任意 | この日数以上経ったメールには返信案を作らない(既定 7 日) |
 | DEV_LOGIN_ENABLED | 任意 | 開発用ログインの有効化(本番では常に無効) |
 | GMAIL_SYNC_QUERY / GMAIL_SYNC_LOOKBACK_DAYS / GMAIL_SYNC_MAX_MESSAGES / SENDER_CHECKS_PER_SYNC | 任意 | 同期の調整(取り込み範囲は既定 30 日、一覧の上限は既定 5,000 件) |
 | GMAIL_QUOTA_UNITS_PER_MINUTE | 任意 | Gmail API の 1 ユーザーあたり 1 分あたりの利用上限(既定 6,000。2026 年 5 月より前に作ったプロジェクトは 15,000) |
-| SYNC_INTERVAL_SECONDS | 任意 | ワーカーの実行間隔(既定 300) |
+| SYNC_INTERVAL_SECONDS | 任意 | ワーカーの実行間隔(既定 3600) |
 | RUN_MIGRATIONS_ON_START | 任意 | `false` でコンテナ起動時のマイグレーションを止める(既定 `true`) |
 
 ## 10. 設計上の判断
 
 | 判断 | 理由 |
 | --- | --- |
-| Gmail はポーリング(push 通知を使わない) | Pub/Sub の設定が不要で、cron でもワーカーでも同じコードで動く。5分間隔でも返信は営業時間内の遅延送信なので体感上の差はない |
+| Gmail はポーリング(push 通知を使わない) | Pub/Sub の設定が不要で、cron でもワーカーでも同じコードで動く。返信は営業時間内に遅らせて送るため、1 時間間隔でも即時通知との差は小さい |
 | 分析と返信生成を2回の呼び出しに分ける | 返信不要なメール(一斉配信など)で返信生成のコストを払わない。分析結果を UI に表示し、判定の根拠を残せる |
 | 判定ロジックを AI ではなくコードで持つ | 「単価に言及したら承認」などの規則を決定的に適用でき、テストできる。AI は「返信にどんな約束が含まれるか」を構造化して申告するだけ |
 | PostgreSQL のみ対応 | Prisma は接続先の種類をスキーマに固定する必要がある。列挙型や配列型を使うため SQLite との両対応はしない。ローカル開発は docker compose で PostgreSQL を起動する |
@@ -285,7 +285,7 @@ erDiagram
 | フォーム送信はサーバーアクション | クライアント JS を最小限にし、ページ全体をサーバーで描画する。操作後は `revalidatePath` で再描画 |
 | 送信は `updateMany` による claim | 複数プロセスから送信処理が走っても1件につき1回しか送らない |
 | 実行環境は Cloud Run | Gmail 連携で Google Cloud プロジェクトが必須なため同じ場所に集約できる。商用利用でき、処理時間の上限が長く(最大 60 分)、個人利用なら無料枠に収まる。Vercel の無料プランは商用利用不可で定期実行が 1 日 1 回までのため採用しない |
-| DB は Supabase の無料プラン | 常時稼働で、5 分ごとの定期処理が DB を使うため 1 週間の非アクティブによる一時停止も起きない。Neon の無料プランは月の計算時間の上限があり、5 分間隔で 24 時間動かすと超える |
+| DB は Supabase の無料プラン | 常時稼働で、1 時間ごとの定期処理が DB を使うため 1 週間の非アクティブによる一時停止も起きない。Neon の無料プランは月の計算時間の上限があり、定期処理を 24 時間動かすと超えるおそれがある |
 | ロックは advisory lock ではなく `JobLock` テーブル | Transaction pooler ではセッションをまたいで advisory lock を保持できないため。行の更新は1文で完結し、接続プール経由でも排他できる |
 | マイグレーションはコンテナ起動時に実行 | ビルド環境に DB の秘密情報を渡さずに済み、デプロイ手順が1つで済む |
 | 時間予算で処理を打ち切る | 1 通あたり AI 呼び出し 2 回で数十秒かかるため、未処理が多いときでも 1 回の実行時間を一定に保つ。残りは次回に回す |

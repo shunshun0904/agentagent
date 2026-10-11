@@ -24,8 +24,8 @@ const EnvSchema = z.object({
   GMAIL_SYNC_MAX_MESSAGES: z.coerce.number().int().positive().default(5000),
   GMAIL_QUOTA_UNITS_PER_MINUTE: z.coerce.number().int().positive().default(6000),
   SENDER_CHECKS_PER_SYNC: z.coerce.number().int().nonnegative().default(40),
-  SYNC_INTERVAL_SECONDS: z.coerce.number().int().positive().default(300),
-  TICK_TIME_BUDGET_SECONDS: z.coerce.number().int().positive().default(240),
+  SYNC_INTERVAL_SECONDS: z.coerce.number().int().positive().default(3600),
+  TICK_TIME_BUDGET_SECONDS: z.coerce.number().int().positive().default(480),
   STALE_REPLY_HOURS: z.coerce.number().int().positive().default(72),
   REPLY_DRAFT_MAX_AGE_DAYS: z.coerce.number().int().positive().default(7),
 });
